@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/crab-core", "crates/crab-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "process", "fs", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+futures = "0.3"
+async-trait = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
