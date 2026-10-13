@@ -5,13 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "fs"] }
 tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+globset.workspace = true
+grep-searcher.workspace = true
+grep-regex.workspace = true
+similar.workspace = true
+tempfile.workspace = true
+shell-words.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tempfile = "3.27"

@@ -1,6 +1,9 @@
 pub mod agent;
+pub mod gate;
 pub mod provider;
 pub mod session;
+pub mod state;
 pub mod stream;
 pub mod tool;
+pub mod tools;
 pub mod types;
