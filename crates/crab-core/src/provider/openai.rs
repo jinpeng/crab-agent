@@ -68,6 +68,42 @@ fn message_to_openai(m: &Message) -> serde_json::Value {
 #[async_trait]
 impl Provider for OpenAiProvider {
     async fn complete(&self, messages: &[Message]) -> Result<AssistantTurn, ProviderError> {
+        let mut attempt = 0u32;
+        loop {
+            match self.complete_once(messages).await {
+                Ok(t) => return Ok(t),
+                Err(ProviderError::Api { status, body }) if status == 429 || status >= 500 => {
+                    attempt += 1;
+                    if attempt > self.max_retries {
+                        return Err(ProviderError::Retryable(format!(
+                            "gave up after {} attempts: {} {}",
+                            self.max_retries, status, body
+                        )));
+                    }
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Err(ProviderError::Network(e)) => {
+                    // Connection failed before any content was produced: safe to retry.
+                    attempt += 1;
+                    if attempt > self.max_retries {
+                        return Err(ProviderError::Retryable(format!("gave up: {e}")));
+                    }
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+fn backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(100 * 2u64.pow(attempt.saturating_sub(1)))
+}
+
+impl OpenAiProvider {
+    /// One attempt. Streaming errors return an interrupted turn (Ok), NOT Err — so the
+    /// retry loop above never retries once content has started (Q13).
+    async fn complete_once(&self, messages: &[Message]) -> Result<AssistantTurn, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let resp = self
             .client
@@ -150,5 +186,100 @@ mod tests {
             ContentBlock::Text { text } => assert_eq!(text, "hi"),
             other => panic!("expected text, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use crate::provider::{Provider, ProviderError};
+    use crate::types::{ContentBlock, Message, Role, StopReason};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    fn user(t: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: t.into() }],
+        }
+    }
+
+    const OK_SSE: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    struct Flaky {
+        n: Arc<AtomicUsize>,
+        fail_times: usize,
+    }
+    impl Respond for Flaky {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            let i = self.n.fetch_add(1, Ordering::SeqCst);
+            if i < self.fail_times {
+                ResponseTemplate::new(429).set_body_string("rate limited")
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_string(OK_SSE)
+                    .insert_header("content-type", "text/event-stream")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_429_then_succeeds() {
+        let server = MockServer::start().await;
+        let n = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .respond_with(Flaky {
+                n: n.clone(),
+                fail_times: 2,
+            })
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
+        let turn = p.complete(&[user("x")]).await.unwrap();
+        assert_eq!(turn.stop_reason, StopReason::EndTurn);
+        assert_eq!(n.load(Ordering::SeqCst), 3); // 2 fail + 1 ok
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_max_retries() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rl"))
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(2);
+        let r = p.complete(&[user("x")]).await;
+        assert!(matches!(
+            r,
+            Err(ProviderError::Retryable(_)) | Err(ProviderError::Api { .. })
+        ));
+    }
+
+    struct CountThenStream {
+        n: Arc<AtomicUsize>,
+    }
+    impl Respond for CountThenStream {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            self.n.fetch_add(1, Ordering::SeqCst);
+            // 200 + partial content, then stream ends without [DONE] (no error, just EOF)
+            ResponseTemplate::new(200)
+                .set_body_string("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+                .insert_header("content-type", "text/event-stream")
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_stream_eof_does_not_retry() {
+        let server = MockServer::start().await;
+        let n = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .respond_with(CountThenStream { n: n.clone() })
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
+        let _turn = p.complete(&[user("x")]).await.unwrap();
+        assert_eq!(n.load(Ordering::SeqCst), 1, "stream started = no retry");
     }
 }
