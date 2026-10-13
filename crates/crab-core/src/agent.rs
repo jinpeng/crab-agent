@@ -3,9 +3,12 @@ use crate::session::{Session, SessionEntry};
 use crate::tool::ToolRegistry;
 use crate::types::{ContentBlock, EntryId, Message, Role, StopReason, ToolCallId};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AgentConfig {
     pub max_turns: usize,
+    /// Prepended to the provider request as the system message. Empty = not injected.
+    /// Not part of session history (it's per-run config, not conversation).
+    pub system_prompt: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -143,8 +146,24 @@ impl Agent {
             // mid-stream, drop the call (a kill_on_drop-style cancel) and persist what
             // we already have. Tool results from prior turns are already recorded.
             let tool_schemas = self.tools.schemas();
+            // Inject system prompt as the first message for THIS call only (not history).
+            let request_msgs: Vec<Message> = if self.config.system_prompt.is_empty() {
+                self.history.clone()
+            } else {
+                let mut v = Vec::with_capacity(self.history.len() + 1);
+                v.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: self.config.system_prompt.clone(),
+                    }],
+                });
+                v.extend(self.history.clone());
+                v
+            };
+            // Record what we actually send (includes the injected system message).
+            *self.provider_calls.last_mut().unwrap() = request_msgs.clone();
             let t = tokio::select! {
-                res = self.provider.complete(&self.history, &tool_schemas, Some(stream_tx)) => res?,
+                res = self.provider.complete(&request_msgs, &tool_schemas, Some(stream_tx)) => res?,
                 _ = self.abort.cancelled() => {
                     let _ = self.events_tx.send(AgentEvent::Finished { reason: StopReason::Aborted });
                     return Ok(StopReason::Aborted);
@@ -267,7 +286,10 @@ pub(crate) mod tests {
             Box::new(provider),
             tools,
             session,
-            AgentConfig { max_turns: 10 },
+            AgentConfig {
+                max_turns: 10,
+                ..Default::default()
+            },
         );
 
         let reason = agent.run("hi".into()).await.unwrap();
@@ -311,7 +333,10 @@ pub(crate) mod tests {
             Box::new(provider),
             tools,
             session,
-            AgentConfig { max_turns: 10 },
+            AgentConfig {
+                max_turns: 10,
+                ..Default::default()
+            },
         );
 
         // Subscribe BEFORE running; on the first ToolCallFinished, cancel BOTH the
@@ -403,7 +428,10 @@ mod bridge_tests {
             Box::new(provider),
             tools,
             session,
-            AgentConfig { max_turns: 5 },
+            AgentConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
         );
         let mut rx = agent.subscribe();
         agent.run("hi".into()).await.unwrap();
@@ -417,5 +445,84 @@ mod bridge_tests {
             }
         }
         assert_eq!(deltas, vec!["a".to_string(), "b".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod system_prompt_tests {
+    use super::*;
+    use crate::provider::MockProvider;
+    use crate::stream::StreamEvent;
+    use crate::tool::{Tool, ToolError, ToolRegistry};
+    use crate::types::StopReason;
+    use async_trait::async_trait;
+
+    struct Noop;
+    #[async_trait]
+    impl Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no op"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+            Ok("done".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn system_prompt_prepended_to_first_request() {
+        let provider = MockProvider::new(vec![vec![StreamEvent::StreamEnd {
+            reason: StopReason::EndTurn,
+        }]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                system_prompt: "BASE RULES".into(),
+            },
+        );
+        agent.run("hi".into()).await.unwrap();
+        let first = &agent.provider_calls()[0];
+        assert!(
+            first.iter().any(|m| m.content.iter().any(|b| matches!(
+                b, ContentBlock::Text { text } if text.contains("BASE RULES")
+            ))),
+            "system prompt must reach provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_system_prompt_not_injected() {
+        let provider = MockProvider::new(vec![vec![StreamEvent::StreamEnd {
+            reason: StopReason::EndTurn,
+        }]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                system_prompt: String::new(),
+            },
+        );
+        agent.run("hi".into()).await.unwrap();
+        let first = &agent.provider_calls()[0];
+        // 只有用户消息，无注入的 system
+        assert_eq!(first.len(), 1);
     }
 }
