@@ -99,7 +99,7 @@ impl Agent {
             role: Role::User,
             content: vec![ContentBlock::Text { text: user_input }],
         };
-        self.record(user.clone());
+        self.record(user.clone())?;
         self.history.push(user);
 
         for turn in 0..self.config.max_turns {
@@ -128,7 +128,7 @@ impl Agent {
             let _ = self
                 .events_tx
                 .send(AgentEvent::AssistantMessage(msg.clone()));
-            self.record(msg.clone());
+            self.record(msg.clone())?;
             self.history.push(msg.clone());
 
             if t.stop_reason != StopReason::ToolUse {
@@ -165,14 +165,15 @@ impl Agent {
                 role: Role::User,
                 content: results,
             };
-            self.record(tool_result_msg.clone());
+            self.record(tool_result_msg.clone())?;
             self.history.push(tool_result_msg);
         }
         Err(AgentError::MaxTurns(self.config.max_turns))
     }
 
-    fn record(&mut self, m: Message) {
-        let _ = self.session.append(m);
+    fn record(&mut self, m: Message) -> Result<(), AgentError> {
+        self.session.append(m)?;
+        Ok(())
     }
 }
 
