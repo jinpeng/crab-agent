@@ -10,13 +10,20 @@ impl GlobTool {
         Self
     }
 
-    fn walk(root: &Path, matcher: &GlobMatcher, out: &mut Vec<String>) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(root)? {
+    /// `root` stays the original search root across recursion so `rel` keeps its
+    /// full relative prefix (nested/lib.rs, not lib.rs); `dir` is the current level.
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        matcher: &GlobMatcher,
+        out: &mut Vec<String>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             let rel = path.strip_prefix(root).unwrap_or(&path);
             if path.is_dir() {
-                Self::walk(&path, matcher, out)?;
+                Self::walk(root, &path, matcher, out)?;
             } else if matcher.is_match(rel) {
                 out.push(rel.to_string_lossy().into_owned());
             }
@@ -64,7 +71,7 @@ impl Tool for GlobTool {
             .map_err(|e| ToolError::InvalidArgs(format!("bad glob: {e}")))?
             .compile_matcher();
         let mut matches = Vec::new();
-        Self::walk(&root, &matcher, &mut matches)
+        Self::walk(&root, &root, &matcher, &mut matches)
             .map_err(|e| ToolError::Exec(format!("glob {pattern}: {e}")))?;
         matches.sort();
         if matches.is_empty() {
