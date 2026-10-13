@@ -95,6 +95,31 @@ impl Agent {
     }
 
     pub async fn run(&mut self, user_input: String) -> Result<StopReason, AgentError> {
+        // Bridge provider's live StreamEvents into AgentEvent::TextDelta (P-A).
+        // Guard aborts the forward task on EVERY exit path so it can't leak.
+        let (stream_tx, mut stream_rx) =
+            tokio::sync::broadcast::channel::<crate::stream::StreamEvent>(64);
+        let events_tx2 = self.events_tx.clone();
+        let forward = tokio::spawn(async move {
+            while let Ok(ev) = stream_rx.recv().await {
+                if let crate::stream::StreamEvent::TextDelta(s) = ev {
+                    let _ = events_tx2.send(AgentEvent::TextDelta(s));
+                }
+            }
+        });
+        let result = self.run_inner(user_input, &stream_tx).await;
+        // Ensure all deltas forwarded before returning, then stop the task.
+        drop(stream_tx);
+        forward.abort();
+        let _ = forward.await;
+        result
+    }
+
+    async fn run_inner(
+        &mut self,
+        user_input: String,
+        stream_tx: &tokio::sync::broadcast::Sender<crate::stream::StreamEvent>,
+    ) -> Result<StopReason, AgentError> {
         let user = Message {
             role: Role::User,
             content: vec![ContentBlock::Text { text: user_input }],
@@ -119,7 +144,7 @@ impl Agent {
             // we already have. Tool results from prior turns are already recorded.
             let tool_schemas = self.tools.schemas();
             let t = tokio::select! {
-                res = self.provider.complete(&self.history, &tool_schemas, None) => res?,
+                res = self.provider.complete(&self.history, &tool_schemas, Some(&stream_tx)) => res?,
                 _ = self.abort.cancelled() => {
                     let _ = self.events_tx.send(AgentEvent::Finished { reason: StopReason::Aborted });
                     return Ok(StopReason::Aborted);
@@ -332,5 +357,65 @@ pub(crate) mod tests {
             )),
             "expected at least one tool_result recorded"
         );
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use crate::provider::MockProvider;
+    use crate::stream::StreamEvent;
+    use crate::tool::{Tool, ToolError, ToolRegistry};
+    use crate::types::StopReason;
+    use async_trait::async_trait;
+
+    struct Noop;
+    #[async_trait]
+    impl Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no op"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+            Ok("done".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_bridges_provider_deltas_to_text_events() {
+        let provider = MockProvider::cooperative(vec![vec![
+            StreamEvent::TextDelta("a".into()),
+            StreamEvent::TextDelta("b".into()),
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig { max_turns: 5 },
+        );
+        let mut rx = agent.subscribe();
+        agent.run("hi".into()).await.unwrap();
+        // Collect TextDelta events with a bounded wait (forward task needs a tick).
+        let mut deltas = Vec::new();
+        while deltas.len() < 2 {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(AgentEvent::TextDelta(s))) => deltas.push(s),
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert_eq!(deltas, vec!["a".to_string(), "b".to_string()]);
     }
 }

@@ -175,7 +175,6 @@ impl OpenAiProvider {
             });
         }
 
-        let _ = on_event; // wired to live-push in Task 2
         let mut acc = StreamAccumulator::new();
         let mut stream = resp.bytes_stream().eventsource();
         'outer: while let Some(ev) = stream.next().await {
@@ -183,6 +182,10 @@ impl OpenAiProvider {
                 Ok(event) => {
                     for se in parse_chunk(&event.data)? {
                         let is_end = matches!(se, StreamEvent::StreamEnd { .. });
+                        // Live-push each event before accumulating (P-A side channel).
+                        if let Some(tx) = on_event {
+                            let _ = tx.send(se.clone());
+                        }
                         acc.push(se);
                         if is_end {
                             break 'outer; // finish_reason reached: stop consuming the stream
@@ -471,5 +474,45 @@ mod tools_in_request_tests {
         p.complete(&msgs, &[], None).await.unwrap();
         let body = &seen.lock().unwrap()[0];
         assert!(body.get("tools").is_none(), "no tools = no tools field");
+    }
+}
+
+#[cfg(test)]
+mod stream_passthrough_tests {
+    use super::*;
+    use crate::provider::Provider;
+    use crate::stream::StreamEvent;
+    use crate::types::{ContentBlock, Message, Role};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user(t: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: t.into() }],
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_streams_deltas_to_on_event() {
+        let server = MockServer::start().await;
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m");
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let _ = p.complete(&[user("x")], &[], Some(&tx)).await.unwrap();
+        drop(tx);
+        let mut deltas = Vec::new();
+        while let Ok(StreamEvent::TextDelta(s)) = rx.recv().await {
+            deltas.push(s);
+        }
+        assert_eq!(deltas, vec!["he".to_string(), "llo".to_string()]);
     }
 }
