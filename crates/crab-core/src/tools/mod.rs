@@ -1,3 +1,4 @@
+pub mod bash;
 pub mod edit;
 pub mod glob;
 pub mod grep;
