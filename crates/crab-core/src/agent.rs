@@ -309,15 +309,14 @@ pub(crate) mod tests {
         // Q11: no orphan tool_use — every tool_use has a paired tool_result on disk.
         let mut pending: Vec<String> = Vec::new();
         for e in agent.session_entries() {
-            if let crate::session::SessionEntry::Message { message, .. } = e {
-                for b in &message.content {
-                    match b {
-                        ContentBlock::ToolUse { id, .. } => pending.push(id.clone()),
-                        ContentBlock::ToolResult { tool_use_id, .. } => {
-                            pending.retain(|x| x != tool_use_id)
-                        }
-                        _ => {}
+            let crate::session::SessionEntry::Message { message, .. } = e;
+            for b in &message.content {
+                match b {
+                    ContentBlock::ToolUse { id, .. } => pending.push(id.clone()),
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        pending.retain(|x| x != tool_use_id)
                     }
+                    _ => {}
                 }
             }
         }
