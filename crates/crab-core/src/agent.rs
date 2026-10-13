@@ -117,8 +117,9 @@ impl Agent {
             // Race the model call against abort (Q11 cancel-safety): if abort fires
             // mid-stream, drop the call (a kill_on_drop-style cancel) and persist what
             // we already have. Tool results from prior turns are already recorded.
+            let tool_schemas = self.tools.schemas();
             let t = tokio::select! {
-                res = self.provider.complete(&self.history) => res?,
+                res = self.provider.complete(&self.history, &tool_schemas) => res?,
                 _ = self.abort.cancelled() => {
                     let _ = self.events_tx.send(AgentEvent::Finished { reason: StopReason::Aborted });
                     return Ok(StopReason::Aborted);
