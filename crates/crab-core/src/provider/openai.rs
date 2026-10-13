@@ -39,13 +39,23 @@ impl OpenAiProvider {
         self
     }
 
-    fn request_body(&self, messages: &[Message]) -> serde_json::Value {
+    fn request_body(&self, messages: &[Message], tools: &[serde_json::Value]) -> serde_json::Value {
         let msgs: Vec<serde_json::Value> = messages.iter().flat_map(messages_to_openai).collect();
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": msgs,
             "stream": true,
-        })
+        });
+        if !tools.is_empty() {
+            // OpenAI tool schema: {"type":"function","function":{...}}.
+            body["tools"] = serde_json::Value::Array(
+                tools
+                    .iter()
+                    .map(|s| serde_json::json!({ "type": "function", "function": s }))
+                    .collect(),
+            );
+        }
+        body
     }
 }
 
@@ -99,10 +109,14 @@ fn messages_to_openai(m: &Message) -> Vec<serde_json::Value> {
 
 #[async_trait]
 impl Provider for OpenAiProvider {
-    async fn complete(&self, messages: &[Message]) -> Result<AssistantTurn, ProviderError> {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[serde_json::Value],
+    ) -> Result<AssistantTurn, ProviderError> {
         let mut attempt = 0u32;
         loop {
-            match self.complete_once(messages).await {
+            match self.complete_once(messages, tools).await {
                 Ok(t) => return Ok(t),
                 Err(ProviderError::Api { status, body }) if status == 429 || status >= 500 => {
                     attempt += 1;
@@ -135,13 +149,17 @@ fn backoff(attempt: u32) -> std::time::Duration {
 impl OpenAiProvider {
     /// One attempt. Streaming errors return an interrupted turn (Ok), NOT Err — so the
     /// retry loop above never retries once content has started (Q13).
-    async fn complete_once(&self, messages: &[Message]) -> Result<AssistantTurn, ProviderError> {
+    async fn complete_once(
+        &self,
+        messages: &[Message],
+        tools: &[serde_json::Value],
+    ) -> Result<AssistantTurn, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let resp = self
             .client
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(&self.request_body(messages))
+            .json(&self.request_body(messages, tools))
             .send()
             .await
             .map_err(|e| ProviderError::Network(format!("send: {e}")))?;
@@ -212,7 +230,7 @@ mod tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "sk-test", "gpt-4o-mini");
-        let turn = p.complete(&[user("hey")]).await.unwrap();
+        let turn = p.complete(&[user("hey")], &[]).await.unwrap();
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         match &turn.message.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "hi"),
@@ -269,7 +287,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
-        let turn = p.complete(&[user("x")]).await.unwrap();
+        let turn = p.complete(&[user("x")], &[]).await.unwrap();
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         assert_eq!(n.load(Ordering::SeqCst), 3); // 2 fail + 1 ok
     }
@@ -282,7 +300,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(2);
-        let r = p.complete(&[user("x")]).await;
+        let r = p.complete(&[user("x")], &[]).await;
         assert!(matches!(
             r,
             Err(ProviderError::Retryable(_)) | Err(ProviderError::Api { .. })
@@ -311,7 +329,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
-        let _turn = p.complete(&[user("x")]).await.unwrap();
+        let _turn = p.complete(&[user("x")], &[]).await.unwrap();
         assert_eq!(n.load(Ordering::SeqCst), 1, "stream started = no retry");
     }
 }
@@ -379,5 +397,76 @@ mod tool_mapping_tests {
         let v = messages_to_openai(&m);
         let tool_msgs: Vec<_> = v.iter().filter(|x| x["role"] == "tool").collect();
         assert_eq!(tool_msgs.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod tools_in_request_tests {
+    use super::*;
+    use crate::provider::Provider;
+    use crate::types::{ContentBlock, Message, Role};
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    /// Captures the request body so we can assert tools were advertised.
+    struct Capture {
+        seen: Arc<StdMutex<Vec<serde_json::Value>>>,
+    }
+    impl Respond for Capture {
+        fn respond(&self, req: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            self.seen.lock().unwrap().push(body);
+            ResponseTemplate::new(200)
+                .set_body_string("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
+                .insert_header("content-type", "text/event-stream")
+        }
+    }
+
+    #[tokio::test]
+    async fn request_includes_tools_schema() {
+        let server = MockServer::start().await;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        Mock::given(method("POST"))
+            .respond_with(Capture { seen: seen.clone() })
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m");
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        }];
+        let tools = vec![serde_json::json!({
+            "name": "read", "description": "read a file",
+            "parameters": {"type":"object","properties":{"path":{"type":"string"}}}
+        })];
+        p.complete(&msgs, &tools).await.unwrap();
+
+        let body = &seen.lock().unwrap()[0];
+        assert!(
+            body.get("tools").is_some(),
+            "request must carry tools schema"
+        );
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "read");
+    }
+
+    #[tokio::test]
+    async fn empty_tools_omits_tools_field() {
+        let server = MockServer::start().await;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        Mock::given(method("POST"))
+            .respond_with(Capture { seen: seen.clone() })
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m");
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        }];
+        p.complete(&msgs, &[]).await.unwrap();
+        let body = &seen.lock().unwrap()[0];
+        assert!(body.get("tools").is_none(), "no tools = no tools field");
     }
 }

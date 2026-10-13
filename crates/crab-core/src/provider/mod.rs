@@ -22,8 +22,14 @@ pub enum ProviderError {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Hand messages to the model, assemble one AssistantTurn. Cancellation-aware.
-    async fn complete(&self, messages: &[Message]) -> Result<AssistantTurn, ProviderError>;
+    /// Hand messages + available tool schemas to the model, assemble one AssistantTurn.
+    /// `tools` are the JSON schemas of currently-available tools (per-request, since
+    /// the set can change as MCP/extension tools come and go). Cancellation-aware.
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[serde_json::Value],
+    ) -> Result<AssistantTurn, ProviderError>;
 }
 
 /// Test provider: each `complete` pops the next scripted event sequence.
@@ -65,7 +71,11 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn complete(&self, messages: &[Message]) -> Result<AssistantTurn, ProviderError> {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[serde_json::Value],
+    ) -> Result<AssistantTurn, ProviderError> {
         self.calls.lock().unwrap().push(messages.to_vec());
         let events = self.scripts.lock().unwrap().pop().unwrap_or_default();
         let mut acc = StreamAccumulator::new();
@@ -108,8 +118,8 @@ mod tests {
             role: Role::User,
             content: vec![],
         }];
-        let t1 = mock.complete(&msgs).await.unwrap();
-        let t2 = mock.complete(&msgs).await.unwrap();
+        let t1 = mock.complete(&msgs, &[]).await.unwrap();
+        let t2 = mock.complete(&msgs, &[]).await.unwrap();
         assert_eq!(t1.stop_reason, StopReason::EndTurn);
         assert_eq!(t2.stop_reason, StopReason::EndTurn);
         assert_eq!(mock.calls().len(), 2);
@@ -126,7 +136,7 @@ mod tests {
         ]]);
         let cancel = mock.abort_handle();
         cancel.cancel();
-        let t = mock.complete(&[]).await.unwrap();
+        let t = mock.complete(&[], &[]).await.unwrap();
         assert!(t.interrupted);
     }
 }
