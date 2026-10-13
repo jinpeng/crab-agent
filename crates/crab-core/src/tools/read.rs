@@ -47,10 +47,15 @@ impl Tool for ReadTool {
 
         let text = String::from_utf8_lossy(&bytes);
         if text.len() > MAX_BYTES {
-            let keep = &text[..MAX_BYTES];
+            // Step the cut back to a char boundary: byte-slicing a multi-byte char panics.
+            let mut cut = MAX_BYTES;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let keep = &text[..cut];
             Ok(format!(
                 "{keep}\n... [truncated {} bytes]",
-                text.len() - MAX_BYTES
+                text.len() - cut
             ))
         } else {
             Ok(text.into_owned())
@@ -99,6 +104,30 @@ mod tests {
             .await
             .unwrap();
         assert!(out.len() < 200_000);
+        assert!(out.contains("truncated"));
+    }
+}
+
+#[cfg(test)]
+mod utf8_boundary_tests {
+    use super::*;
+    use crate::state::SessionState;
+    use crate::tool::Tool;
+
+    #[tokio::test]
+    async fn truncation_does_not_panic_on_multibyte_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mb.txt");
+        // '中' is 3 bytes; pad so the 100KB cut lands inside a multi-byte char.
+        let mut content = "x".repeat(99_999);
+        content.push_str("中文中文中文");
+        content.push_str(&"y".repeat(200_000));
+        std::fs::write(&p, content).unwrap();
+        let t = ReadTool::new(SessionState::default());
+        let out = t
+            .execute(serde_json::json!({"path": p.to_str().unwrap()}))
+            .await
+            .unwrap();
         assert!(out.contains("truncated"));
     }
 }

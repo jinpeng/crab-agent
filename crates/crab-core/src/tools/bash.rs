@@ -62,9 +62,18 @@ impl BashTool {
         if s.len() <= HEAD_BYTES + TAIL_BYTES {
             return s.to_string();
         }
-        let head = &s[..HEAD_BYTES];
-        let tail = &s[s.len() - TAIL_BYTES..];
-        let omitted = s.len() - HEAD_BYTES - TAIL_BYTES;
+        // Snap both cuts to char boundaries: byte-slicing a multi-byte char panics.
+        let mut head_end = HEAD_BYTES;
+        while !s.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        let mut tail_start = s.len() - TAIL_BYTES;
+        while !s.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let head = &s[..head_end];
+        let tail = &s[tail_start..];
+        let omitted = s.len() - head_end - (s.len() - tail_start);
         format!("{head}\n... [omitted {omitted} bytes] ...\n{tail}")
     }
 }
@@ -211,5 +220,25 @@ mod tests {
         assert!(!is_read_only("cat $(rm x)"));
         assert!(!is_read_only("ls && rm x"));
         assert!(!is_read_only("echo x > file"));
+    }
+}
+
+#[cfg(test)]
+mod utf8_boundary_tests {
+    use super::*;
+    use crate::gate::PermissionGate;
+    use crate::tool::Tool;
+
+    #[tokio::test]
+    async fn truncate_does_not_panic_on_multibyte_output() {
+        let t = BashTool::new(PermissionGate::auto_approve());
+        // emit >60KB of multi-byte content so truncation cuts mid-char
+        let out = t
+            .execute(serde_json::json!({
+                "command": "python3 -c \"print('中'*40000)\""
+            }))
+            .await
+            .unwrap();
+        assert!(out.contains("omitted") || out.contains("truncated"));
     }
 }
