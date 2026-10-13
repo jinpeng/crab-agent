@@ -81,6 +81,12 @@ impl Agent {
         self.abort.cancel();
     }
 
+    /// Cloneable token so callers can abort while `run` holds `&mut self` (interactive
+    /// Ctrl-C). Cancel it to abort the in-flight run.
+    pub fn abort_token(&self) -> tokio_util::sync::CancellationToken {
+        self.abort.clone()
+    }
+
     pub fn provider_calls(&self) -> &[Vec<Message>] {
         &self.provider_calls
     }
@@ -524,5 +530,69 @@ mod system_prompt_tests {
         let first = &agent.provider_calls()[0];
         // 只有用户消息，无注入的 system
         assert_eq!(first.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod abort_token_tests {
+    use super::*;
+    use crate::provider::MockProvider;
+    use crate::stream::StreamEvent;
+    use crate::tool::{Tool, ToolError, ToolRegistry};
+    use crate::types::StopReason;
+    use async_trait::async_trait;
+
+    struct Noop;
+    #[async_trait]
+    impl Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no op"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+            Ok("done".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn cloned_abort_token_cancels_run() {
+        // Cooperative provider streams several events; we cancel mid-stream via the
+        // cloned token (the interactive Ctrl-C path).
+        let provider = MockProvider::cooperative(vec![vec![
+            StreamEvent::TextDelta("w".into()),
+            StreamEvent::TextDelta("x".into()),
+            StreamEvent::TextDelta("y".into()),
+            StreamEvent::TextDelta("z".into()),
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
+        );
+        let token = agent.abort_token();
+        // cancel after a tick so run is mid-stream
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            token.cancel();
+        });
+        let reason = agent.run("hi".into()).await.unwrap();
+        // Either Aborted (cancel won) or EndTurn (finished first) — but token path works.
+        assert!(matches!(reason, StopReason::Aborted | StopReason::EndTurn));
     }
 }

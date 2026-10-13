@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod app;
+mod interactive;
 mod render;
 
 #[derive(Parser)]
@@ -29,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(prompt) = cli.print.clone() {
         return run_print(&cli, prompt).await;
     }
-    // Interactive mode: Task 6. For now, a clear message.
-    anyhow::bail!("interactive mode not yet implemented; use --print \"...\"")
+    let cfg = app::AppConfig::from(&cli);
+    interactive::run_interactive(&cfg, cli.continue_).await
 }
 
 async fn run_print(cli: &Cli, prompt: String) -> anyhow::Result<()> {
