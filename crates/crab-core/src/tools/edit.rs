@@ -12,6 +12,8 @@ pub enum EditError {
     NotUnique { count: usize, first_byte: usize },
     #[error("edits overlap")]
     Overlap,
+    #[error("old text must be non-empty")]
+    EmptyOld,
 }
 
 /// Apply multiple edits to content. Each `old` must match the ORIGINAL text exactly
@@ -21,6 +23,11 @@ pub fn apply_edits(content: &str, edits: &[Edit]) -> Result<String, EditError> {
     // 1. Find all match positions per edit; require uniqueness.
     let mut spans: Vec<(usize, usize, &str)> = Vec::new(); // (start, end, new)
     for e in edits {
+        if e.old.is_empty() {
+            // Empty `old` is meaningless (matches everywhere / once on empty content);
+            // reject explicitly rather than produce a garbage no-op edit.
+            return Err(EditError::EmptyOld);
+        }
         let matches: Vec<usize> = content.match_indices(&e.old).map(|(i, _)| i).collect();
         match matches.len() {
             0 => return Err(EditError::NoMatch(closest_hint(content, &e.old))),
@@ -144,5 +151,21 @@ mod tests {
             ),
             other => panic!("expected NoMatch with hint, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adjacent_edits_do_not_overlap() {
+        // Edges touch but don't overlap: each replaces its own bytes.
+        let r = apply_edits("abcdef", &edits(&[("ab", "X"), ("cd", "Y")])).unwrap();
+        assert_eq!(r, "XYef");
+    }
+
+    #[test]
+    fn empty_old_is_rejected() {
+        // Empty `old` is meaningless; reject explicitly in all cases.
+        let r = apply_edits("content", &edits(&[("", "x")]));
+        assert!(matches!(r, Err(EditError::EmptyOld)));
+        let r2 = apply_edits("", &edits(&[("", "x")]));
+        assert!(matches!(r2, Err(EditError::EmptyOld)));
     }
 }
