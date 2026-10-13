@@ -241,6 +241,8 @@ workspace 骨架、edition 2024、release profile、CI（`fmt` + `clippy -D warn
 **M2 工具层**
 `read` / `write` / `glob` / `grep` 先做（简单），剩余时间全砸给 `edit`（见第 5 节测试矩阵）。最后 `bash`（`kill_on_drop` / 超时 / 输出截断）。
 
+**✅ 已完成（2026-10-13，分支 `m2-tools`）。** 6 工具全部落地，累计 56 测试全绿。新增共享状态：`SessionState`（新鲜度，`Arc<Mutex<>>`）与 `PermissionGate`（门禁，`Confirmer` 回调 trait，v0 仅 AutoApprove/AutoDeny，交互确认留 M4）。`register_all` 装配。实现中修正：(1) `edit` 引擎显式拒绝空 `old`（`EditError::EmptyOld`，空串在空文件上会恰好匹配一次产生无意义替换）；(2) `glob` 递归 walk 必须把原始 root 一路传下，否则 `strip_prefix` 丢嵌套前缀（`nested/lib.rs` 错成 `lib.rs`）；(3) `similar` 3.2 `ratio()` 返回 `f32`。
+
 **M3 真 provider**
 reqwest + rustls + SSE 接到 M1 的状态机上，retry 策略，wiremock 传输层测试。这一步结束第一次看到真实模型在动。
 
