@@ -1,0 +1,15 @@
+[package]
+name = "crab-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "crab"
+path = "src/main.rs"
+
+[dependencies]
+crab-core = { path = "../crab-core" }
+tokio.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
