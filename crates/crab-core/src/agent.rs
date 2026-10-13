@@ -144,7 +144,7 @@ impl Agent {
             // we already have. Tool results from prior turns are already recorded.
             let tool_schemas = self.tools.schemas();
             let t = tokio::select! {
-                res = self.provider.complete(&self.history, &tool_schemas, Some(&stream_tx)) => res?,
+                res = self.provider.complete(&self.history, &tool_schemas, Some(stream_tx)) => res?,
                 _ = self.abort.cancelled() => {
                     let _ = self.events_tx.send(AgentEvent::Finished { reason: StopReason::Aborted });
                     return Ok(StopReason::Aborted);
