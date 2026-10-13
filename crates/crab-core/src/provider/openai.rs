@@ -175,14 +175,14 @@ impl OpenAiProvider {
 
         let mut acc = StreamAccumulator::new();
         let mut stream = resp.bytes_stream().eventsource();
-        while let Some(ev) = stream.next().await {
+        'outer: while let Some(ev) = stream.next().await {
             match ev {
                 Ok(event) => {
                     for se in parse_chunk(&event.data)? {
                         let is_end = matches!(se, StreamEvent::StreamEnd { .. });
                         acc.push(se);
                         if is_end {
-                            break;
+                            break 'outer; // finish_reason reached: stop consuming the stream
                         }
                     }
                 }
