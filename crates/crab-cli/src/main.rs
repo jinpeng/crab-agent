@@ -5,7 +5,7 @@ mod render;
 
 #[derive(Parser)]
 #[command(name = "crab", version, about = "Rust coding agent")]
-struct Cli {
+pub struct Cli {
     /// Run once non-interactively and print the final response
     #[arg(long, short = 'p')]
     print: Option<String>,
@@ -23,10 +23,24 @@ struct Cli {
     system: Option<String>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    println!(
-        "crab: print={:?} continue={} yolo={} provider={}",
-        cli.print, cli.continue_, cli.yolo, cli.provider
-    );
+    if let Some(prompt) = cli.print.clone() {
+        return run_print(&cli, prompt).await;
+    }
+    // Interactive mode: Task 6. For now, a clear message.
+    anyhow::bail!("interactive mode not yet implemented; use --print \"...\"")
+}
+
+async fn run_print(cli: &Cli, prompt: String) -> anyhow::Result<()> {
+    let cfg = app::AppConfig::from(cli);
+    let (mut agent, _sys) = app::build_agent(&cfg, cli.continue_)?;
+    let rx = agent.subscribe();
+    let render = tokio::spawn(render::render_events(rx));
+    let reason = agent.run(prompt).await?;
+    drop(agent);
+    let _ = render.await;
+    let _ = reason;
+    Ok(())
 }
