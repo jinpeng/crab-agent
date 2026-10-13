@@ -40,7 +40,7 @@ impl OpenAiProvider {
     }
 
     fn request_body(&self, messages: &[Message]) -> serde_json::Value {
-        let msgs: Vec<serde_json::Value> = messages.iter().map(message_to_openai).collect();
+        let msgs: Vec<serde_json::Value> = messages.iter().flat_map(messages_to_openai).collect();
         serde_json::json!({
             "model": self.model,
             "messages": msgs,
@@ -49,20 +49,52 @@ impl OpenAiProvider {
     }
 }
 
-/// Map an internal Message to an OpenAI chat message (v0: text only; tool mapping in Task 7).
-fn message_to_openai(m: &Message) -> serde_json::Value {
+/// Map an internal Message to one-or-more OpenAI chat messages. A user message with
+/// several tool_results expands to several `role:tool` messages (OpenAI protocol).
+fn messages_to_openai(m: &Message) -> Vec<serde_json::Value> {
     use crate::types::{ContentBlock, Role};
     let role = match m.role {
         Role::User => "user",
         Role::Assistant => "assistant",
     };
+    let mut out = Vec::new();
     let mut text = String::new();
+    let mut tool_calls = Vec::new();
     for b in &m.content {
-        if let ContentBlock::Text { text: t } = b {
-            text.push_str(t);
+        match b {
+            ContentBlock::Text { text: t } => text.push_str(t),
+            ContentBlock::ToolUse { id, name, input } => {
+                tool_calls.push(serde_json::json!({
+                    "id": id, "type": "function",
+                    "function": { "name": name, "arguments": input.to_string() }
+                }));
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                out.push(serde_json::json!({
+                    "role": "tool", "tool_call_id": tool_use_id, "content": content
+                }));
+            }
         }
     }
-    serde_json::json!({ "role": role, "content": text })
+
+    if !text.is_empty() || !tool_calls.is_empty() || out.is_empty() {
+        let mut msg = serde_json::json!({ "role": role });
+        if !text.is_empty() {
+            msg["content"] = serde_json::Value::String(text);
+        }
+        if !tool_calls.is_empty() {
+            msg["tool_calls"] = serde_json::Value::Array(tool_calls);
+        }
+        if msg.get("content").is_none() && msg.get("tool_calls").is_none() {
+            msg["content"] = serde_json::Value::String(String::new());
+        }
+        out.insert(0, msg);
+    }
+    out
 }
 
 #[async_trait]
@@ -281,5 +313,71 @@ mod retry_tests {
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
         let _turn = p.complete(&[user("x")]).await.unwrap();
         assert_eq!(n.load(Ordering::SeqCst), 1, "stream started = no retry");
+    }
+}
+
+#[cfg(test)]
+mod tool_mapping_tests {
+    use super::*;
+    use crate::types::{ContentBlock, Message, Role};
+
+    #[test]
+    fn assistant_tool_use_maps_to_tool_calls() {
+        let m = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path":"x"}),
+            }],
+        };
+        let v = messages_to_openai(&m);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["role"], "assistant");
+        assert_eq!(v[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(v[0]["tool_calls"][0]["function"]["name"], "read");
+        // arguments must be stringified JSON (OpenAI protocol)
+        assert_eq!(
+            v[0]["tool_calls"][0]["function"]["arguments"],
+            r#"{"path":"x"}"#
+        );
+    }
+
+    #[test]
+    fn tool_result_maps_to_tool_role_message() {
+        let m = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "file contents".into(),
+                is_error: false,
+            }],
+        };
+        let v = messages_to_openai(&m);
+        assert!(v.iter().any(|msg| msg["role"] == "tool"
+            && msg["tool_call_id"] == "call_1"
+            && msg["content"] == "file contents"));
+    }
+
+    #[test]
+    fn multiple_tool_results_expand_to_separate_tool_messages() {
+        let m = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "a".into(),
+                    content: "ra".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "b".into(),
+                    content: "rb".into(),
+                    is_error: false,
+                },
+            ],
+        };
+        let v = messages_to_openai(&m);
+        let tool_msgs: Vec<_> = v.iter().filter(|x| x["role"] == "tool").collect();
+        assert_eq!(tool_msgs.len(), 2);
     }
 }
