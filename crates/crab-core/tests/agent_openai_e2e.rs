@@ -57,7 +57,12 @@ async fn agent_drives_real_read_tool_via_openai_provider() {
     let provider = OpenAiProvider::new(server.uri(), "sk-test", "m");
     let tools = register_all(SessionState::default(), PermissionGate::auto_approve());
     let session = Session::create(dir.path()).unwrap();
-    let mut agent = Agent::new(Box::new(provider), tools, session, AgentConfig { max_turns: 10 });
+    let mut agent = Agent::new(
+        Box::new(provider),
+        tools,
+        session,
+        AgentConfig { max_turns: 10 },
+    );
 
     let reason = agent.run("read the note".into()).await.unwrap();
     assert_eq!(reason, StopReason::EndTurn);

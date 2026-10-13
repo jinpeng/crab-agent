@@ -246,6 +246,8 @@ workspace 骨架、edition 2024、release profile、CI（`fmt` + `clippy -D warn
 **M3 真 provider**
 reqwest + rustls + SSE 接到 M1 的状态机上，retry 策略，wiremock 传输层测试。这一步结束第一次看到真实模型在动。
 
+**✅ 已完成（2026-10-13，分支 `m3-provider`）。** 累计 85 测试全绿。`OpenAiProvider`（reqwest+rustls）经 `bytes_stream().eventsource()` 接 `parse_chunk`（纯函数）→ `StreamAccumulator`。retry 拆 `complete`（循环）+ `complete_once`：429/5xx/连接失败退避 ≤3 次，**流式开始后 EOF/错误走 `StreamEnd{Error}` 落盘不重试**。认证 `Credentials::from_env` 依赖注入（`get_env`/`read_file` 闭包）。e2e：agent 经 wiremock mock OpenAI 驱动真实 read 工具两轮。实现修正：(1) `parse_chunk`/`messages_to_openai` 返回 `Vec`（一个 chunk/消息可展开多个事件/消息）；(2) **edition 2024 把 `std::env::set_var` 标为 `unsafe`**——放弃串行锁方案，认证改依赖注入；(3) wiremock 序列化响应（429×N 后 200）需实现 `Respond` trait。注：release bin 仍 0.32MiB，因 cli 未引用 provider（dead-code strip），M4 接入后才有意义。
+
 **M4 CLI**
 `--print` 先落（可被 `assert_cmd` 端到端测）→ reedline + 流式打印 → 权限确认 UI → `AGENTS.md` 加载。
 
