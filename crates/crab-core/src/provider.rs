@@ -25,6 +25,9 @@ pub struct MockProvider {
     scripts: Mutex<Vec<Vec<StreamEvent>>>,
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
     cancel: CancellationToken,
+    /// When true, yield to the scheduler between events so a concurrent abort can
+    /// interleave mid-stream (mimics a real provider awaiting network IO).
+    cooperative: bool,
 }
 
 impl MockProvider {
@@ -34,7 +37,15 @@ impl MockProvider {
             scripts: Mutex::new(scripts.into_iter().rev().collect()),
             calls: Arc::new(Mutex::new(Vec::new())),
             cancel: CancellationToken::new(),
+            cooperative: false,
         }
+    }
+
+    /// A mock that yields between events, so abort can land mid-stream.
+    pub fn cooperative(scripts: Vec<Vec<StreamEvent>>) -> Self {
+        let mut s = Self::new(scripts);
+        s.cooperative = true;
+        s
     }
 
     pub fn calls(&self) -> Vec<Vec<Message>> {
@@ -60,6 +71,9 @@ impl Provider for MockProvider {
                 break;
             }
             acc.push(ev);
+            if self.cooperative {
+                tokio::task::yield_now().await;
+            }
         }
         Ok(acc.finish())
     }

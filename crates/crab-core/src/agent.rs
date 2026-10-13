@@ -114,7 +114,16 @@ impl Agent {
             let _ = self.events_tx.send(AgentEvent::TurnStarted { turn });
 
             self.provider_calls.push(self.history.clone());
-            let t = self.provider.complete(&self.history).await?;
+            // Race the model call against abort (Q11 cancel-safety): if abort fires
+            // mid-stream, drop the call (a kill_on_drop-style cancel) and persist what
+            // we already have. Tool results from prior turns are already recorded.
+            let t = tokio::select! {
+                res = self.provider.complete(&self.history) => res?,
+                _ = self.abort.cancelled() => {
+                    let _ = self.events_tx.send(AgentEvent::Finished { reason: StopReason::Aborted });
+                    return Ok(StopReason::Aborted);
+                }
+            };
             let msg = t.message.clone();
             let _ = self
                 .events_tx
@@ -246,5 +255,81 @@ pub(crate) mod tests {
             })
         });
         assert!(has_tool_result, "tool result must be fed back to model");
+    }
+
+    #[tokio::test]
+    async fn abort_after_first_tool_result_persists_no_orphan_tool_use() {
+        // Turn 1: model requests a tool, tool runs. We abort when the tool result
+        // arrives, so turn 2's complete() sees the abort. Turn 1's tool_use +
+        // tool_result must both be on disk (no orphan tool_use).
+        // Turn 1 requests a tool. Turn 2 streams several events; the cooperative mock
+        // yields between them, so the abort watcher (fired on ToolCallFinished) can
+        // land mid-stream. That makes the abort deterministic, not a scheduling race.
+        let provider = MockProvider::cooperative(vec![
+            tool_turn(),
+            vec![
+                StreamEvent::TextDelta("working".into()),
+                StreamEvent::TextDelta(" more".into()),
+                StreamEvent::StreamEnd {
+                    reason: StopReason::EndTurn,
+                },
+            ],
+        ]);
+        let provider_cancel = provider.abort_handle();
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig { max_turns: 10 },
+        );
+
+        // Subscribe BEFORE running; on the first ToolCallFinished, cancel BOTH the
+        // agent token (checked at turn top + select!) and the provider token (checked
+        // inside complete()). This mirrors a real Ctrl-C hitting the whole stack.
+        let mut rx = agent.subscribe();
+        let abort = agent.abort.clone();
+        let watcher = tokio::spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                if matches!(ev, AgentEvent::ToolCallFinished { .. }) {
+                    abort.cancel();
+                    provider_cancel.cancel();
+                    break;
+                }
+            }
+        });
+
+        let reason = agent.run("hi".into()).await.unwrap();
+        watcher.await.unwrap();
+        assert_eq!(reason, StopReason::Aborted);
+
+        // Q11: no orphan tool_use — every tool_use has a paired tool_result on disk.
+        let mut pending: Vec<String> = Vec::new();
+        for e in agent.session_entries() {
+            if let crate::session::SessionEntry::Message { message, .. } = e {
+                for b in &message.content {
+                    match b {
+                        ContentBlock::ToolUse { id, .. } => pending.push(id.clone()),
+                        ContentBlock::ToolResult { tool_use_id, .. } => {
+                            pending.retain(|x| x != tool_use_id)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(pending.is_empty(), "orphan tool_use ids left: {pending:?}");
+        // And we must have actually run the tool (otherwise the assertion is vacuous).
+        assert!(
+            agent.session_entries().iter().any(|e| matches!(
+                e,
+                crate::session::SessionEntry::Message { message, .. }
+                    if message.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            )),
+            "expected at least one tool_result recorded"
+        );
     }
 }
