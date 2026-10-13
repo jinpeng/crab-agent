@@ -22,13 +22,16 @@ pub enum ProviderError {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Hand messages + available tool schemas to the model, assemble one AssistantTurn.
     /// `tools` are the JSON schemas of currently-available tools (per-request, since
     /// the set can change as MCP/extension tools come and go). Cancellation-aware.
+    /// `on_event`: optional channel the provider pushes StreamEvents into AS THEY
+    /// ARRIVE (for live terminal rendering). The returned AssistantTurn is unchanged —
+    /// streaming is a side channel (P-A).
     async fn complete(
         &self,
         messages: &[Message],
         tools: &[serde_json::Value],
+        on_event: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
     ) -> Result<AssistantTurn, ProviderError>;
 }
 
@@ -75,6 +78,7 @@ impl Provider for MockProvider {
         &self,
         messages: &[Message],
         _tools: &[serde_json::Value],
+        on_event: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
     ) -> Result<AssistantTurn, ProviderError> {
         self.calls.lock().unwrap().push(messages.to_vec());
         let events = self.scripts.lock().unwrap().pop().unwrap_or_default();
@@ -85,6 +89,9 @@ impl Provider for MockProvider {
                     reason: crate::types::StopReason::Aborted,
                 });
                 break;
+            }
+            if let Some(tx) = on_event {
+                let _ = tx.send(ev.clone());
             }
             acc.push(ev);
             if self.cooperative {
@@ -118,8 +125,8 @@ mod tests {
             role: Role::User,
             content: vec![],
         }];
-        let t1 = mock.complete(&msgs, &[]).await.unwrap();
-        let t2 = mock.complete(&msgs, &[]).await.unwrap();
+        let t1 = mock.complete(&msgs, &[], None).await.unwrap();
+        let t2 = mock.complete(&msgs, &[], None).await.unwrap();
         assert_eq!(t1.stop_reason, StopReason::EndTurn);
         assert_eq!(t2.stop_reason, StopReason::EndTurn);
         assert_eq!(mock.calls().len(), 2);
@@ -136,7 +143,46 @@ mod tests {
         ]]);
         let cancel = mock.abort_handle();
         cancel.cancel();
-        let t = mock.complete(&[], &[]).await.unwrap();
+        let t = mock.complete(&[], &[], None).await.unwrap();
         assert!(t.interrupted);
+    }
+
+    #[tokio::test]
+    async fn mock_streams_events_to_on_event_channel() {
+        let mock = MockProvider::cooperative(vec![vec![
+            StreamEvent::TextDelta("a".into()),
+            StreamEvent::TextDelta("b".into()),
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let _ = mock.complete(&[], &[], Some(&tx)).await.unwrap();
+        drop(tx);
+        let mut got = Vec::new();
+        while let Ok(e) = rx.recv().await {
+            got.push(e);
+        }
+        assert!(
+            got.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "a"))
+        );
+        assert!(
+            got.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "b"))
+        );
+        assert!(
+            got.iter()
+                .any(|e| matches!(e, StreamEvent::StreamEnd { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_without_on_event_still_works() {
+        let mock = MockProvider::new(vec![vec![StreamEvent::StreamEnd {
+            reason: StopReason::EndTurn,
+        }]]);
+        let t = mock.complete(&[], &[], None).await.unwrap();
+        assert_eq!(t.stop_reason, StopReason::EndTurn);
     }
 }

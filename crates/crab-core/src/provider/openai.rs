@@ -113,10 +113,11 @@ impl Provider for OpenAiProvider {
         &self,
         messages: &[Message],
         tools: &[serde_json::Value],
+        on_event: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
     ) -> Result<AssistantTurn, ProviderError> {
         let mut attempt = 0u32;
         loop {
-            match self.complete_once(messages, tools).await {
+            match self.complete_once(messages, tools, on_event).await {
                 Ok(t) => return Ok(t),
                 Err(ProviderError::Api { status, body }) if status == 429 || status >= 500 => {
                     attempt += 1;
@@ -153,6 +154,7 @@ impl OpenAiProvider {
         &self,
         messages: &[Message],
         tools: &[serde_json::Value],
+        on_event: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
     ) -> Result<AssistantTurn, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let resp = self
@@ -173,6 +175,7 @@ impl OpenAiProvider {
             });
         }
 
+        let _ = on_event; // wired to live-push in Task 2
         let mut acc = StreamAccumulator::new();
         let mut stream = resp.bytes_stream().eventsource();
         'outer: while let Some(ev) = stream.next().await {
@@ -230,7 +233,7 @@ mod tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "sk-test", "gpt-4o-mini");
-        let turn = p.complete(&[user("hey")], &[]).await.unwrap();
+        let turn = p.complete(&[user("hey")], &[], None).await.unwrap();
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         match &turn.message.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "hi"),
@@ -287,7 +290,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
-        let turn = p.complete(&[user("x")], &[]).await.unwrap();
+        let turn = p.complete(&[user("x")], &[], None).await.unwrap();
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         assert_eq!(n.load(Ordering::SeqCst), 3); // 2 fail + 1 ok
     }
@@ -300,7 +303,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(2);
-        let r = p.complete(&[user("x")], &[]).await;
+        let r = p.complete(&[user("x")], &[], None).await;
         assert!(matches!(
             r,
             Err(ProviderError::Retryable(_)) | Err(ProviderError::Api { .. })
@@ -329,7 +332,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
-        let _turn = p.complete(&[user("x")], &[]).await.unwrap();
+        let _turn = p.complete(&[user("x")], &[], None).await.unwrap();
         assert_eq!(n.load(Ordering::SeqCst), 1, "stream started = no retry");
     }
 }
@@ -441,7 +444,7 @@ mod tools_in_request_tests {
             "name": "read", "description": "read a file",
             "parameters": {"type":"object","properties":{"path":{"type":"string"}}}
         })];
-        p.complete(&msgs, &tools).await.unwrap();
+        p.complete(&msgs, &tools, None).await.unwrap();
 
         let body = &seen.lock().unwrap()[0];
         assert!(
@@ -465,7 +468,7 @@ mod tools_in_request_tests {
             role: Role::User,
             content: vec![ContentBlock::Text { text: "hi".into() }],
         }];
-        p.complete(&msgs, &[]).await.unwrap();
+        p.complete(&msgs, &[], None).await.unwrap();
         let body = &seen.lock().unwrap()[0];
         assert!(body.get("tools").is_none(), "no tools = no tools field");
     }
