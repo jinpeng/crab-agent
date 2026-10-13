@@ -75,6 +75,96 @@ fn closest_hint(content: &str, needle: &str) -> String {
     }
 }
 
+use crate::gate::{PermissionGate, Prompt};
+use crate::state::SessionState;
+use crate::tool::{Tool, ToolError};
+use async_trait::async_trait;
+use std::path::PathBuf;
+
+pub struct EditTool {
+    state: SessionState,
+    gate: PermissionGate,
+}
+
+impl EditTool {
+    pub fn new(state: SessionState, gate: PermissionGate) -> Self {
+        Self { state, gate }
+    }
+}
+
+#[async_trait]
+impl Tool for EditTool {
+    fn name(&self) -> &'static str {
+        "edit"
+    }
+
+    fn description(&self) -> &'static str {
+        "Apply exact-match edits to a file. Each edit's `old` must match the file EXACTLY once (literal, no whitespace tolerance) and edits must not overlap; all edits match against the original content and apply atomically (all-or-nothing). The file must have been read this session and be unchanged since."
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old": { "type": "string", "description": "exact text, must match uniquely" },
+                            "new": { "type": "string", "description": "replacement" }
+                        },
+                        "required": ["old", "new"]
+                    }
+                }
+            },
+            "required": ["path", "edits"]
+        })
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let p = PathBuf::from(path);
+        let edits: Vec<Edit> = serde_json::from_value(args["edits"].clone())
+            .map_err(|e| ToolError::InvalidArgs(format!("bad 'edits': {e}")))?;
+        if edits.is_empty() {
+            return Err(ToolError::InvalidArgs("'edits' must be non-empty".into()));
+        }
+
+        if !self.state.is_fresh(&p) {
+            return Err(ToolError::Exec(format!(
+                "refusing to edit {path}: not read this session or changed externally. read it first"
+            )));
+        }
+        let original = tokio::fs::read_to_string(&p)
+            .await
+            .map_err(|e| ToolError::Exec(format!("read {path}: {e}")))?;
+        let updated = apply_edits(&original, &edits).map_err(|e| ToolError::Exec(e.to_string()))?;
+
+        self.gate.check(Prompt {
+            tool: "edit",
+            summary: format!("edit {path} ({} edit(s))", edits.len()),
+        })?;
+
+        // Atomic write: same-dir temp file then rename.
+        let dir = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let mut tmp =
+            tempfile::NamedTempFile::new_in(dir).map_err(|e| ToolError::Exec(e.to_string()))?;
+        std::io::Write::write_all(&mut tmp, updated.as_bytes())
+            .map_err(|e| ToolError::Exec(e.to_string()))?;
+        tmp.persist(&p)
+            .map_err(|e| ToolError::Exec(e.error.to_string()))?;
+
+        if let Ok(m) = std::fs::metadata(&p).and_then(|md| md.modified()) {
+            self.state.mark_read(p, m);
+        }
+        Ok(format!("applied {} edit(s) to {path}", edits.len()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +257,91 @@ mod tests {
         assert!(matches!(r, Err(EditError::EmptyOld)));
         let r2 = apply_edits("", &edits(&[("", "x")]));
         assert!(matches!(r2, Err(EditError::EmptyOld)));
+    }
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+    use crate::gate::PermissionGate;
+    use crate::state::SessionState;
+    use crate::tool::Tool;
+    use crate::tools::read::ReadTool;
+
+    async fn fresh_file(
+        dir: &tempfile::TempDir,
+        name: &str,
+        content: &str,
+        state: &SessionState,
+    ) -> std::path::PathBuf {
+        let p = dir.path().join(name);
+        std::fs::write(&p, content).unwrap();
+        ReadTool::new(state.clone())
+            .execute(serde_json::json!({"path": p.to_str().unwrap()}))
+            .await
+            .unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn edit_applies_to_disk_when_fresh_and_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = SessionState::default();
+        let p = fresh_file(&dir, "a.txt", "hello world", &state).await;
+        let t = EditTool::new(state, PermissionGate::auto_approve());
+        t.execute(serde_json::json!({
+            "path": p.to_str().unwrap(),
+            "edits": [{"old": "world", "new": "rust"}]
+        }))
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello rust");
+    }
+
+    #[tokio::test]
+    async fn edit_rejected_when_not_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = SessionState::default();
+        let p = dir.path().join("b.txt");
+        std::fs::write(&p, "data").unwrap();
+        let t = EditTool::new(state, PermissionGate::auto_approve());
+        let r = t
+            .execute(serde_json::json!({
+                "path": p.to_str().unwrap(), "edits": [{"old": "data", "new": "x"}]
+            }))
+            .await;
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "data");
+    }
+
+    #[tokio::test]
+    async fn failed_match_leaves_file_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = SessionState::default();
+        let original = "line1\r\nline2\r\n";
+        let p = fresh_file(&dir, "c.txt", original, &state).await;
+        let t = EditTool::new(state, PermissionGate::auto_approve());
+        let r = t
+            .execute(serde_json::json!({
+                "path": p.to_str().unwrap(), "edits": [{"old": "nomatch", "new": "x"}]
+            }))
+            .await;
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn edit_denied_by_gate_leaves_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = SessionState::default();
+        let p = fresh_file(&dir, "d.txt", "keep me", &state).await;
+        let t = EditTool::new(state, PermissionGate::auto_deny());
+        let r = t
+            .execute(serde_json::json!({
+                "path": p.to_str().unwrap(), "edits": [{"old": "keep", "new": "x"}]
+            }))
+            .await;
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "keep me");
     }
 }
