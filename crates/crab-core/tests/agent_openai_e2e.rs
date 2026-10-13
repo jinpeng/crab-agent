@@ -1,6 +1,5 @@
 use crab_core::agent::{Agent, AgentConfig};
 use crab_core::gate::PermissionGate;
-use crab_core::provider::Provider;
 use crab_core::provider::openai::OpenAiProvider;
 use crab_core::session::Session;
 use crab_core::state::SessionState;
