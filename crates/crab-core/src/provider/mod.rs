@@ -4,6 +4,10 @@ use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+pub mod auth;
+pub mod openai;
+pub mod sse;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("network: {0}")]
@@ -12,6 +16,8 @@ pub enum ProviderError {
     Retryable(String),
     #[error("aborted")]
     Aborted,
+    #[error("api error {status}: {body}")]
+    Api { status: u16, body: String },
 }
 
 #[async_trait]
