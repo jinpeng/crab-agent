@@ -44,6 +44,35 @@ impl Session {
         &self.entries
     }
 
+    /// Rebuild from a JSONL file (for --continue). Parses line by line; any bad line errors.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let raw = std::fs::read_to_string(path)?;
+        let mut entries = Vec::new();
+        let mut max_id = None::<EntryId>;
+        for (n, line) in raw.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry: SessionEntry = serde_json::from_str(line).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{}:{}: {}", path.display(), n + 1, e),
+                )
+            })?;
+            max_id = Some(max_id.map_or(entry.id(), |m: EntryId| m.max(entry.id())));
+            entries.push(entry);
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            next_id: max_id.map(|m| m + 1).unwrap_or(0),
+            entries,
+        })
+    }
+
+    pub fn next_id(&self) -> EntryId {
+        self.next_id
+    }
+
     pub fn append(&mut self, message: Message) -> std::io::Result<EntryId> {
         let id = self.next_id;
         let parent_id = self.entries.last().map(|e| e.id());
@@ -108,5 +137,44 @@ mod tests {
         for line in raw.lines() {
             serde_json::from_str::<SessionEntry>(line).unwrap();
         }
+    }
+
+    #[test]
+    fn load_reconstructs_entries_and_next_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        s.append(msg("a")).unwrap();
+        s.append(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: "b".into() }],
+        })
+        .unwrap();
+        let path = s.path().to_path_buf();
+        drop(s);
+
+        let loaded = Session::load(&path).unwrap();
+        assert_eq!(loaded.entries().len(), 2);
+        assert_eq!(loaded.next_id(), 2);
+    }
+
+    #[test]
+    fn load_continues_appending_after_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        s.append(msg("a")).unwrap();
+        let path = s.path().to_path_buf();
+        drop(s);
+
+        let mut loaded = Session::load(&path).unwrap();
+        let id = loaded.append(msg("c")).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn load_rejects_garbage_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bad.jsonl");
+        std::fs::write(&p, "{\"kind\":\"message\",\"id\":0,\"parent_id\":null,\"message\":{\"role\":\"user\",\"content\":[]}}\nnot-json\n").unwrap();
+        assert!(Session::load(&p).is_err());
     }
 }
