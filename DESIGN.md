@@ -236,6 +236,8 @@ workspace 骨架、edition 2024、release profile、CI（`fmt` + `clippy -D warn
 
 **✅ 已完成（2026-10-13，分支 `m0-m1-spine`）。** 17 测试全绿。实现中发现两处计划缺口已修正：(1) `StreamEvent` 定义在 stream.rs 而非 types.rs（实现细节不入领域类型）；(2) MockProvider 加 `cooperative` 模式（逐事件 yield）模拟真实 provider 的 IO await，否则 abort 测试因瞬时回放无法确定性触发。另修正 abort 语义：`complete()` 用 `tokio::select!` 同时监听 abort（取消安全）。
 
+**Review 遗留（M4 处理）**：`AgentEvent::TextDelta` 已定义但 M1 的 loop 不透传流式 delta（MockProvider 攒成完整 message 才发 `AssistantMessage`）。M4 做流式打印时，需让 provider 把增量 delta 实时透传为 `AgentEvent::TextDelta`。
+
 **M2 工具层**
 `read` / `write` / `glob` / `grep` 先做（简单），剩余时间全砸给 `edit`（见第 5 节测试矩阵）。最后 `bash`（`kill_on_drop` / 超时 / 输出截断）。
 
