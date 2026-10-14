@@ -26,6 +26,7 @@ walkdir = "2"
 toml = "1.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "charset", "json", "stream"] }
 eventsource-stream = "0.2"
+dom_smoothie = "0.18"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 reedline = "0.52"

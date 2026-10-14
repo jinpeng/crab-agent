@@ -8,7 +8,7 @@ use crab_core::state::SessionState;
 use crab_core::tools::register_all;
 use std::path::{Path, PathBuf};
 
-pub const BASE_PROMPT: &str = r#"You are crab, a coding agent. You have these tools: read, write, edit, bash, glob, grep.
+pub const BASE_PROMPT: &str = r#"You are crab, a coding agent. You have these tools: read, write, edit, bash, glob, grep, web_fetch.
 
 Rules for editing files:
 - ALWAYS read a file before editing or overwriting it. The edit/write tools refuse to touch a file you haven't read this session (freshness gate) — this protects against overwriting external changes.
@@ -16,6 +16,7 @@ Rules for editing files:
 - If `edit` fails with "no match", re-read the file and copy the exact text from the error hint.
 - Use `write` only for new files, or full rewrites after a read.
 - Prefer `glob`/`grep` to locate files and symbols before reading whole files.
+- Use `web_fetch` to pull a URL's main article text (readability) when you need web docs or references.
 
 Be precise and minimal. Verify changes compile or pass tests with `bash` when relevant."#;
 
