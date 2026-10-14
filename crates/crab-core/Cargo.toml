@@ -14,6 +14,7 @@ async-trait.workspace = true
 globset.workspace = true
 grep-searcher.workspace = true
 grep-regex.workspace = true
+ignore.workspace = true
 similar.workspace = true
 tempfile.workspace = true
 shell-words.workspace = true
