@@ -2,7 +2,39 @@ use crate::app::{AppConfig, build_agent};
 use crate::render::render_events_with_status;
 use crate::status::StatusLine;
 use anyhow::Result;
-use reedline::{DefaultPrompt, Reedline, Signal};
+use reedline::{Prompt, PromptEditMode, PromptHistorySearch, Reedline, Signal};
+use std::borrow::Cow;
+
+/// Minimal prompt: a plain `crab> `, with no cwd, date, or mode glyphs in the way.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CrabPrompt;
+
+impl Prompt for CrabPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Borrowed("crab")
+    }
+
+    // Deliberately mode-independent: vi/helix mode changes must not restyle the
+    // indicator, so `crab> ` stays byte-identical in every edit mode.
+    fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("> ")
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed("··· ")
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        _history_search: PromptHistorySearch,
+    ) -> Cow<'_, str> {
+        Cow::Borrowed("search: ")
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Input {
@@ -23,7 +55,7 @@ pub fn classify(s: &str) -> Input {
 pub async fn run_interactive(cfg: &AppConfig, continue_: bool) -> Result<()> {
     let (mut agent, _sys, provider) = build_agent(cfg, continue_)?;
     let mut rl = Reedline::create();
-    let prompt = DefaultPrompt::default();
+    let prompt = CrabPrompt;
     println!("crab interactive. /quit to exit, Ctrl-C aborts the current run.");
 
     loop {
@@ -31,7 +63,8 @@ pub async fn run_interactive(cfg: &AppConfig, continue_: bool) -> Result<()> {
         // hold across await, so move it in and back out each iteration.
         let (returned_rl, sig) = tokio::task::spawn_blocking({
             let mut rl_moved = std::mem::replace(&mut rl, Reedline::create());
-            let prompt = prompt.clone();
+            // `CrabPrompt` is `Copy`, so the closure takes a snapshot and the
+            // outer `prompt` stays usable for the next iteration.
             move || {
                 let sig = rl_moved.read_line(&prompt);
                 (rl_moved, sig)
@@ -88,5 +121,31 @@ mod tests {
         assert_eq!(classify(""), Input::Skip);
         assert_eq!(classify("   "), Input::Skip);
         assert_eq!(classify("hello"), Input::Message("hello".into()));
+    }
+
+    #[test]
+    fn prompt_renders_minimal_crab_indicator() {
+        let prompt = CrabPrompt;
+        assert_eq!(prompt.render_prompt_left(), "crab");
+        assert_eq!(
+            prompt.render_prompt_indicator(PromptEditMode::Default),
+            "> "
+        );
+        assert_eq!(prompt.render_prompt_right(), "");
+        assert_eq!(prompt.render_prompt_multiline_indicator(), "··· ");
+        assert_eq!(
+            prompt.render_prompt_history_search_indicator(PromptHistorySearch::new(
+                reedline::PromptHistorySearchStatus::Passing,
+                "x".into(),
+            )),
+            "search: "
+        );
+        // The visible prompt is exactly `crab> `.
+        let rendered = format!(
+            "{}{}",
+            prompt.render_prompt_left(),
+            prompt.render_prompt_indicator(PromptEditMode::Default)
+        );
+        assert_eq!(rendered, "crab> ");
     }
 }

@@ -113,14 +113,17 @@ pub async fn render_events_with_status(
         let is_end = matches!(ev, AgentEvent::Finished { .. });
         update_status(&mut status, &ev);
 
-        // If a tool block follows an unterminated text delta, move to a fresh line first.
-        let needs_lf_before = matches!(
-            ev,
-            AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolCallFinished { .. }
-        );
-        if needs_lf_before {
-            let _ = writeln!(out);
+        // TextDelta streams mid-line: print it and DON'T redraw the status line
+        // (redrawing per-delta would wrap every word onto its own line).
+        if matches!(ev, AgentEvent::TextDelta(_)) {
+            render_event(&mut out, &theme, &ev);
+            if is_end {
+                let _ = writeln!(out);
+                break;
+            }
+            continue;
         }
+
         render_event(&mut out, &theme, &ev);
 
         if is_end {
@@ -128,7 +131,7 @@ pub async fn render_events_with_status(
             break;
         }
 
-        // Draw the status line on its own line below the content.
+        // Structured events (tool calls, usage): redraw the status line below.
         let _ = writeln!(out);
         draw_status(&mut out, &theme, &status);
         status_drawn = true;
