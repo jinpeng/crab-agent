@@ -124,7 +124,9 @@ impl Agent {
         let events_tx2 = self.events_tx.clone();
         let forward = tokio::spawn(async move {
             while let Ok(ev) = stream_rx.recv().await {
-                if std::env::var("CRAB_DEBUG_FWD").is_ok() { eprintln!("FWD RECV {ev:?}"); }
+                if std::env::var("CRAB_DEBUG_FWD").is_ok() {
+                    eprintln!("FWD RECV {ev:?}");
+                }
                 match ev {
                     crate::stream::StreamEvent::TextDelta(s) => {
                         let _ = events_tx2.send(AgentEvent::TextDelta(s));
