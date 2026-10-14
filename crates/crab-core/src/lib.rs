@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod gate;
+pub mod mcp;
 pub mod provider;
 pub mod session;
 pub mod state;

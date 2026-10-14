@@ -31,6 +31,7 @@ dom_smoothie = "0.18"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 reedline = "0.52"
+rmcp = { version = "3.5", default-features = false, features = ["client", "transport-child-process"] }
 
 [profile.release]
 lto = "thin"
