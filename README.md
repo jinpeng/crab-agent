@@ -9,7 +9,8 @@ It is a small single binary that starts fast, so you can put it in a pipe, wire
 it into a script, or just open it and type.
 
 Design decisions (and the reasoning behind them) live in [DESIGN.md](DESIGN.md).
-This file is the user-facing manual.
+This file is the user-facing manual. For how crab was built — including the fact that
+much of it was written by crab itself — see [STORY.md](STORY.md).
 
 ## Install
 
