@@ -516,3 +516,93 @@ mod stream_passthrough_tests {
         assert_eq!(deltas, vec!["he".to_string(), "llo".to_string()]);
     }
 }
+
+#[cfg(test)]
+mod tools_schema_shape_tests {
+    use crate::gate::PermissionGate;
+    use crate::state::SessionState;
+    use crate::tools::register_all;
+
+    #[test]
+    fn real_tool_schemas_have_function_name_and_parameters() {
+        // Regression for the DeepSeek 422: schemas() must yield full
+        // {name, description, parameters} per tool, not bare parameters.
+        let reg = register_all(SessionState::default(), PermissionGate::auto_approve());
+        let schemas = reg.schemas();
+        assert!(!schemas.is_empty());
+        for s in &schemas {
+            assert!(s.get("name").is_some(), "schema missing name: {s}");
+            assert!(
+                s.get("description").is_some(),
+                "schema missing description: {s}"
+            );
+            assert!(
+                s.get("parameters").is_some(),
+                "schema missing parameters: {s}"
+            );
+        }
+        // spot-check read
+        let read = schemas.iter().find(|s| s["name"] == "read").unwrap();
+        assert_eq!(read["parameters"]["type"], "object");
+    }
+}
+
+#[cfg(test)]
+mod wire_request_shape_tests {
+    use crate::gate::PermissionGate;
+    use crate::provider::Provider;
+    use crate::provider::openai::OpenAiProvider;
+    use crate::state::SessionState;
+    use crate::tools::register_all;
+    use crate::types::{ContentBlock, Message, Role};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct Capture {
+        seen: Arc<StdMutex<Vec<serde_json::Value>>>,
+    }
+    impl Respond for Capture {
+        fn respond(&self, req: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            self.seen.lock().unwrap().push(body);
+            ResponseTemplate::new(200)
+                .set_body_string("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+                .insert_header("content-type", "text/event-stream")
+        }
+    }
+
+    /// Reproduces the DeepSeek 422: the wire request's tools[0].function must have
+    /// name/description/parameters. Drives the REAL register_all().schemas() path.
+    #[tokio::test]
+    async fn wire_request_has_valid_openai_function_tools() {
+        let server = MockServer::start().await;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        Mock::given(method("POST"))
+            .respond_with(Capture { seen: seen.clone() })
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "deepseek-chat");
+        let tools = register_all(SessionState::default(), PermissionGate::auto_approve()).schemas();
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        }];
+        p.complete(&msgs, &tools, None).await.unwrap();
+
+        let body = &seen.lock().unwrap()[0];
+        let f = &body["tools"][0]["function"];
+        assert!(
+            f.get("name").is_some(),
+            "function.name missing (DeepSeek 422): {f}"
+        );
+        assert!(
+            f.get("description").is_some(),
+            "function.description missing: {f}"
+        );
+        assert!(
+            f.get("parameters").is_some(),
+            "function.parameters missing: {f}"
+        );
+    }
+}

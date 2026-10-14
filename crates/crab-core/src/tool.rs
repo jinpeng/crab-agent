@@ -34,8 +34,21 @@ impl ToolRegistry {
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
+    /// Full OpenAI-style function schemas: {name, description, parameters}.
+    /// `Tool::schema()` yields only the parameters object; we wrap it here so every
+    /// tool gets name+description without duplicating them. (DeepSeek 422 regression:
+    /// function.name is required.)
     pub fn schemas(&self) -> Vec<serde_json::Value> {
-        self.tools.values().map(|t| t.schema()).collect()
+        self.tools
+            .values()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name(),
+                    "description": t.description(),
+                    "parameters": t.schema(),
+                })
+            })
+            .collect()
     }
     pub async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String, ToolError> {
         match self.tools.get(name) {
