@@ -11,12 +11,12 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
-      # Q17: binary-size hard assert. Measured at M4 completion: 6.90 MiB (7235328 B)
-      # on macOS. Linux release build differs; freeze at 12 MiB ceiling to be safe
-      # across platforms. Deterministic (same code = same size class), unlike timing.
+      # Q17: binary-size hard assert. Measured: 6.90 MiB macOS at M4, ~10 MiB macOS /
+      # ~12.5 MiB Linux after MCP (rmcp) + web_fetch (dom_smoothie). Freeze at 16 MiB
+      # to cover the Linux/macOS delta plus headroom, while still catching bloat.
       - name: release size budget
         run: |
           cargo build --release -p crab-cli
           SIZE=$(stat -c%s target/release/crab 2>/dev/null || stat -f%z target/release/crab)
           echo "release crab: $SIZE bytes"
-          test "$SIZE" -lt 12582912 || { echo "SIZE BUDGET EXCEEDED (>12MiB)"; exit 1; }
+          test "$SIZE" -lt 16777216 || { echo "SIZE BUDGET EXCEEDED (>16MiB)"; exit 1; }
