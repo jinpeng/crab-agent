@@ -39,3 +39,13 @@
 - 暴露的 crab 缺陷: 无（这轮 crab 没撞新鲜度门禁/edit 匹配问题——prompt 强化生效了）
 - commits: 77a5f85 (name→Cow), 3491f68 (config mcp), 1d8447c (McpClient), aecc1dc (McpTool), b05b251 (startup wiring)
 - release 体积: 8.24 → 10.11 MiB (rmcp)
+
+## 2026-10-14 — 接入 Brave Search MCP server（端到端验证）
+
+- 任务: 配置真实 MCP server（Brave Search）+ 端到端搜索验证
+- 结果: 成功（`brave-search__brave_web_search` 返回真实搜索结果）
+- 关键发现（crab 用户会撞的坑）:
+  1. **Node 的 fetch 不走 `https_proxy` 环境变量**——Node 写的 MCP server（如 brave-search）直连外网会被代理网络挡。修法：MCP server 的 env 里加 `NODE_OPTIONS = "--use-env-proxy"`（Node 24+ 支持）。
+  2. crab 的 MCP `env` 字段正好承载这个；且 env 值不进 ps/门禁提示，适合放 API key。
+- 用到的 crab 能力: web_fetch 读配置文档、MCP env 配置（ crab 自己加的）、MCP 工具注册/调用/门禁全链路。
+- commit: f636f9d (env support)
