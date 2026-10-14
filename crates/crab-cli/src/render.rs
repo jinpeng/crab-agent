@@ -89,6 +89,14 @@ fn render_event(out: &mut impl Write, theme: &Theme, ev: &AgentEvent) {
 /// (carriage-return + clear line) — valid because the status line is exactly the
 /// current line. We never move *up* a line, so multi-line tool blocks and unterminated
 /// text deltas can't corrupt it.
+///
+/// Second invariant: while a confirmation is pending
+/// ([`crate::status::RunState::WaitingConfirm`]) the confirmer owns the current
+/// line, so nothing here may touch it. The agent emits no event when it blocks on
+/// a confirmation, so the confirmer's own flag is what tells us; we wait for the
+/// answer before drawing again. Without that, an event still queued from before
+/// the prompt (a straggler delta, a usage line) would erase the prompt just as
+/// the user is reading it.
 pub async fn render_events_with_status(
     mut rx: tokio::sync::broadcast::Receiver<AgentEvent>,
     mut status: crate::status::StatusLine,
@@ -104,6 +112,10 @@ pub async fn render_events_with_status(
             Err(RecvError::Lagged(_)) => continue,
             Err(RecvError::Closed) => break,
         };
+
+        // A confirmation prompt is on the current line: leave it alone until it's
+        // answered, then carry on with the event that just arrived.
+        wait_for_confirmation().await;
 
         // Erase the status line if it's the current line before printing content.
         if std::mem::take(&mut status_drawn) {
@@ -143,6 +155,20 @@ fn draw_status(out: &mut impl Write, theme: &Theme, status: &crate::status::Stat
     let line = status.format(terminal_width());
     let _ = write!(out, "{}", theme.dim(&line));
     let _ = out.flush();
+}
+
+/// Poll interval while a confirmation is pending. The wait is driven by a human
+/// reading a prompt, so a few wakeups per second are free.
+const CONFIRM_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Hold off until no confirmation prompt is waiting for an answer.
+///
+/// Cheap and idempotent (one relaxed-ish atomic load) when nothing is pending,
+/// which is the overwhelmingly common case.
+async fn wait_for_confirmation() {
+    while crate::confirm::confirm_pending() {
+        tokio::time::sleep(CONFIRM_POLL).await;
+    }
 }
 
 fn update_status(status: &mut crate::status::StatusLine, ev: &AgentEvent) {
@@ -304,5 +330,14 @@ mod tests {
                 "line too wide: {line:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn renderer_does_not_stall_when_no_confirmation_is_pending() {
+        // The confirm guard sits on the hot path of every event: with nothing
+        // pending it must return immediately rather than sleep or spin.
+        tokio::time::timeout(std::time::Duration::from_secs(1), wait_for_confirmation())
+            .await
+            .expect("renderer waited for a confirmation that was never requested");
     }
 }
