@@ -256,6 +256,10 @@ reqwest + rustls + SSE 接到 M1 的状态机上，retry 策略，wiremock 传�
 **M5 dogfood**
 用 crab 改 crab，每次失败记成 issue。
 
+**✅ Q2 验收已达成（2026-10-14，commit `f3fec8e`）。** crab 给 `Session` 加了 `pub fn len(&self) -> usize` + 单元测试（`len_tracks_number_of_entries`），测试通过，人 review 后 commit。这是第一个 diff 完全由 crab（经 DeepSeek）产生的 commit。
+
+dogfood 前先修了两个硬伤（M5 phase 1，commit `a44449a`）：(1) `--continue` 失忆——`Agent::new` 永远空 history，现从 `session.entries()` 重建；(2) BASE_PROMPT 太薄——补上新鲜度门禁（edit/write 前先 read）与 edit 纪律（批量、精确匹配、读报错 hint）。过程记录见 `docs/dogfood-log.md`。
+
 **已知张力**：M1 要求在看到任何真实 token 之前先写三四天纯内部代码，对单人项目是士气风险。允许第一周写一个 50 行、直连 API、只为把字节打印出来的 spike，**看完即删**——不要让它长成 provider 实现，否则 loop 会被第一家 API 的形状拧歪。
 
 ---
