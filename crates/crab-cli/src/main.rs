@@ -7,6 +7,10 @@ mod render;
 // TODO: used by render.rs once it consumes the theme; until then, silence dead_code.
 #[allow(dead_code)]
 mod theme;
+// TODO: used by render.rs once it truncates styled output to the terminal width;
+// until then, silence dead_code.
+#[allow(dead_code)]
+mod width;
 
 #[derive(Parser)]
 #[command(name = "crab", version, about = "Rust coding agent")]
