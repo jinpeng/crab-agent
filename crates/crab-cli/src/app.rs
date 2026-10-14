@@ -79,10 +79,9 @@ pub fn build_agent(cfg: &AppConfig, continue_: bool) -> Result<(Agent, String)> 
         name => {
             let config = crab_core::config::Config::load_from(None)
                 .map_err(|e| anyhow::anyhow!("config: {e}"))?;
-            let r = crab_core::config::resolve_credentials(&config, name, &|k| {
-                std::env::var(k).ok()
-            })
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let r =
+                crab_core::config::resolve_credentials(&config, name, &|k| std::env::var(k).ok())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             Box::new(OpenAiProvider::new(
                 r.base_url.clone(),
                 r.api_key.clone(),

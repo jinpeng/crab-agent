@@ -84,7 +84,10 @@ mod tests {
     fn truncate_keeps_ansi_intact() {
         let truncated = truncate_to_width("\x1b[36mhello world\x1b[0m", 5);
         assert_eq!(visible_width(&truncated), 5);
-        assert!(truncated.contains("\x1b[0m"), "reset missing: {truncated:?}");
+        assert!(
+            truncated.contains("\x1b[0m"),
+            "reset missing: {truncated:?}"
+        );
     }
 
     #[test]

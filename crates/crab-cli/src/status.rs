@@ -220,7 +220,14 @@ mod tests {
         status.set_tokens_used(1200);
         status.set_context(Some(8500), Some(128000));
         let line = status.format(200);
-        for needle in ["openai/gpt-5", "tool", "1.2k", "ctx 8.5k/128.0k", "7%", "work/crab"] {
+        for needle in [
+            "openai/gpt-5",
+            "tool",
+            "1.2k",
+            "ctx 8.5k/128.0k",
+            "7%",
+            "work/crab",
+        ] {
             assert!(line.contains(needle), "missing {needle:?} in {line:?}");
         }
         assert!(!line.contains("idle"), "stale state in {line:?}");

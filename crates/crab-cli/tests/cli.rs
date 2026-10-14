@@ -91,10 +91,14 @@ fn unknown_provider_lists_available() {
         "default_provider=\"a\"\n[providers.a]\nbase_url=\"http://x\"\nmodel=\"m\"\napi_key=\"k\"\n",
     ).unwrap();
     let mut cmd = assert_cmd::Command::cargo_bin("crab").unwrap();
-    cmd.arg("--provider").arg("zzz").arg("--print").arg("hi")
+    cmd.arg("--provider")
+        .arg("zzz")
+        .arg("--print")
+        .arg("hi")
         .current_dir(dir.path())
         .env("HOME", dir.path())
-        .assert().failure()
+        .assert()
+        .failure()
         .stderr(predicates::str::contains("zzz").and(predicates::str::contains("a")));
 }
 
@@ -111,9 +115,13 @@ fn config_profile_resolves_and_runs_mock_style() {
     ).unwrap();
     // --provider a against an unreachable localhost should fail with a network error, not a config error
     let mut cmd = assert_cmd::Command::cargo_bin("crab").unwrap();
-    cmd.arg("--provider").arg("a").arg("--print").arg("hi")
+    cmd.arg("--provider")
+        .arg("a")
+        .arg("--print")
+        .arg("hi")
         .current_dir(dir.path())
         .env("HOME", dir.path())
-        .assert().failure()
+        .assert()
+        .failure()
         .stderr(predicates::str::contains("unknown provider").not());
 }
