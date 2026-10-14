@@ -2,6 +2,7 @@ use crate::gate::{PermissionGate, Prompt};
 use crate::state::SessionState;
 use crate::tool::{Tool, ToolError};
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 pub struct WriteTool {
@@ -27,8 +28,8 @@ impl WriteTool {
 
 #[async_trait]
 impl Tool for WriteTool {
-    fn name(&self) -> &'static str {
-        "write"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("write")
     }
 
     fn description(&self) -> &'static str {

@@ -1,6 +1,7 @@
 use crate::state::SessionState;
 use crate::tool::{Tool, ToolError};
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 const MAX_BYTES: usize = 100_000;
@@ -17,8 +18,8 @@ impl ReadTool {
 
 #[async_trait]
 impl Tool for ReadTool {
-    fn name(&self) -> &'static str {
-        "read"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("read")
     }
 
     fn description(&self) -> &'static str {

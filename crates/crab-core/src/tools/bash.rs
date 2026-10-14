@@ -1,6 +1,7 @@
 use crate::gate::{PermissionGate, Prompt};
 use crate::tool::{Tool, ToolError};
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -80,8 +81,8 @@ impl BashTool {
 
 #[async_trait]
 impl Tool for BashTool {
-    fn name(&self) -> &'static str {
-        "bash"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("bash")
     }
 
     fn description(&self) -> &'static str {

@@ -4,6 +4,7 @@ use grep_regex::RegexMatcher;
 use grep_searcher::SearcherBuilder;
 use grep_searcher::sinks::UTF8;
 use ignore::WalkBuilder;
+use std::borrow::Cow;
 use std::path::Path;
 
 const MAX_MATCHES: usize = 200;
@@ -38,8 +39,8 @@ impl Default for GrepTool {
 
 #[async_trait]
 impl Tool for GrepTool {
-    fn name(&self) -> &'static str {
-        "grep"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("grep")
     }
 
     fn description(&self) -> &'static str {

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -13,7 +14,7 @@ pub enum ToolError {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> Cow<'static, str>;
     fn description(&self) -> &'static str;
     fn schema(&self) -> serde_json::Value;
     async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError>;
@@ -21,7 +22,7 @@ pub trait Tool: Send + Sync {
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: HashMap<&'static str, Box<dyn Tool>>,
+    tools: HashMap<String, Box<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -29,7 +30,7 @@ impl ToolRegistry {
         Self::default()
     }
     pub fn register(&mut self, t: Box<dyn Tool>) {
-        self.tools.insert(t.name(), t);
+        self.tools.insert(t.name().into_owned(), t);
     }
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
@@ -67,8 +68,8 @@ mod tests {
 
     #[async_trait]
     impl Tool for Echo {
-        fn name(&self) -> &'static str {
-            "echo"
+        fn name(&self) -> Cow<'static, str> {
+            Cow::Borrowed("echo")
         }
         fn description(&self) -> &'static str {
             "echo back input.text"
@@ -95,5 +96,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UnknownTool(_)));
+    }
+
+    /// A tool whose name is built at runtime (e.g. an MCP server prefix) must
+    /// register, be findable, and execute like any built-in tool.
+    struct DynTool;
+
+    #[async_trait]
+    impl Tool for DynTool {
+        fn name(&self) -> Cow<'static, str> {
+            Cow::Owned("srv__tool".to_string())
+        }
+        fn description(&self) -> &'static str {
+            "dynamically named"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}})
+        }
+        async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
+            Ok(args["text"].as_str().unwrap_or("").to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_accepts_runtime_constructed_name() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DynTool));
+        assert!(reg.contains("srv__tool"));
+        let out = reg
+            .execute("srv__tool", serde_json::json!({"text":"hi"}))
+            .await
+            .unwrap();
+        assert_eq!(out, "hi");
+        assert_eq!(reg.schemas()[0]["name"], "srv__tool");
     }
 }

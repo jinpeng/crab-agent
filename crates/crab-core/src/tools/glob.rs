@@ -1,6 +1,7 @@
 use crate::tool::{Tool, ToolError};
 use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
+use std::borrow::Cow;
 use std::path::Path;
 
 pub struct GlobTool;
@@ -40,8 +41,8 @@ impl Default for GlobTool {
 
 #[async_trait]
 impl Tool for GlobTool {
-    fn name(&self) -> &'static str {
-        "glob"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("glob")
     }
 
     fn description(&self) -> &'static str {
