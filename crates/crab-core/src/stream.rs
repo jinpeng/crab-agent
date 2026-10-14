@@ -15,6 +15,12 @@ pub enum StreamEvent {
     ToolUseEnd {
         index: usize,
     },
+    /// Token accounting frame. Some providers (e.g. DeepSeek) send this in the
+    /// same chunk as `StreamEnd`, so it must be pushed before it.
+    Usage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
     StreamEnd {
         reason: StopReason,
     },
@@ -33,6 +39,7 @@ pub struct StreamAccumulator {
     /// (index, slot); output sorted by index for stable ordering.
     slots: Vec<(usize, ToolSlot)>,
     stop: StopReason,
+    usage: Option<(u32, u32)>,
 }
 
 impl StreamAccumulator {
@@ -41,6 +48,7 @@ impl StreamAccumulator {
             text: String::new(),
             slots: Vec::new(),
             stop: StopReason::EndTurn,
+            usage: None,
         }
     }
 
@@ -66,6 +74,10 @@ impl StreamAccumulator {
                 }
             }
             StreamEvent::ToolUseEnd { .. } => {}
+            StreamEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+            } => self.usage = Some((prompt_tokens, completion_tokens)),
             StreamEvent::StreamEnd { reason } => self.stop = reason,
         }
     }
@@ -116,6 +128,7 @@ impl StreamAccumulator {
             },
             stop_reason: self.stop,
             interrupted,
+            usage: self.usage,
         }
     }
 }
@@ -259,5 +272,32 @@ mod tests {
             ContentBlock::Text { text } => assert_eq!(text, "partial"),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usage_event_is_captured_into_turn() {
+        let t = run(vec![
+            StreamEvent::TextDelta("hi".into()),
+            StreamEvent::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+            },
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]);
+        assert_eq!(t.usage, Some((10, 5)));
+        match &t.message.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "hi"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_usage_event_leaves_turn_usage_none() {
+        let t = run(vec![StreamEvent::StreamEnd {
+            reason: StopReason::EndTurn,
+        }]);
+        assert_eq!(t.usage, None);
     }
 }

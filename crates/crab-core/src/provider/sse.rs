@@ -48,6 +48,18 @@ pub fn parse_chunk(data: &str) -> Result<Vec<StreamEvent>, ProviderError> {
         }
     }
 
+    // Token usage frame. DeepSeek sends `usage` in the SAME chunk as the final
+    // finish_reason; intermediate chunks carry `usage: null` and must be ignored.
+    // Pushed BEFORE StreamEnd so consumers see usage while the stream is still open.
+    if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+        let prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let completion_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        out.push(StreamEvent::Usage {
+            prompt_tokens,
+            completion_tokens,
+        });
+    }
+
     if let Some(fr) = choice["finish_reason"].as_str() {
         let reason = match fr {
             "stop" => StopReason::EndTurn,
@@ -166,5 +178,44 @@ mod tests {
         assert_eq!(e.len(), 2);
         assert!(matches!(e[0], StreamEvent::ToolUseStart { index: 0, .. }));
         assert!(matches!(e[1], StreamEvent::ToolUseStart { index: 1, .. }));
+    }
+
+    #[test]
+    fn usage_frame_with_finish_reason_yields_both_events_usage_first() {
+        // DeepSeek real shape: finish_reason and usage share the final chunk.
+        let e = parse_chunk(r#"{"choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}"#)
+            .unwrap();
+        assert!(e.iter().any(|x| matches!(
+            x,
+            StreamEvent::Usage {
+                prompt_tokens: 9,
+                completion_tokens: 1
+            }
+        )));
+        assert!(e.iter().any(|x| matches!(
+            x,
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn
+            }
+        )));
+        let pos_usage = e
+            .iter()
+            .position(|x| matches!(x, StreamEvent::Usage { .. }))
+            .unwrap();
+        let pos_end = e
+            .iter()
+            .position(|x| matches!(x, StreamEvent::StreamEnd { .. }))
+            .unwrap();
+        assert!(pos_usage < pos_end, "Usage must precede StreamEnd: {e:?}");
+    }
+
+    #[test]
+    fn usage_null_frame_ignored() {
+        // DeepSeek intermediate chunks carry `usage: null`.
+        let e = parse_chunk(
+            r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}"#,
+        )
+        .unwrap();
+        assert_eq!(e, vec![StreamEvent::TextDelta("hi".into())]);
     }
 }
