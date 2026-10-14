@@ -79,6 +79,7 @@ use crate::gate::{PermissionGate, Prompt};
 use crate::state::SessionState;
 use crate::tool::{Tool, ToolError};
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 pub struct EditTool {
@@ -94,12 +95,14 @@ impl EditTool {
 
 #[async_trait]
 impl Tool for EditTool {
-    fn name(&self) -> &'static str {
-        "edit"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("edit")
     }
 
-    fn description(&self) -> &'static str {
-        "Apply exact-match edits to a file. Each edit's `old` must match the file EXACTLY once (literal, no whitespace tolerance) and edits must not overlap; all edits match against the original content and apply atomically (all-or-nothing). The file must have been read this session and be unchanged since."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Apply exact-match edits to a file. Each edit's `old` must match the file EXACTLY once (literal, no whitespace tolerance) and edits must not overlap; all edits match against the original content and apply atomically (all-or-nothing). The file must have been read this session and be unchanged since.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

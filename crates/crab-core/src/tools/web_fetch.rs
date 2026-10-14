@@ -2,6 +2,7 @@ use crate::gate::{PermissionGate, Prompt};
 use crate::tool::{Tool, ToolError};
 use async_trait::async_trait;
 use dom_smoothie::{Config as ReadabilityConfig, Readability, TextMode};
+use std::borrow::Cow;
 use std::time::Duration;
 
 /// Hard cap on how much of the response body we read (defends against huge pages).
@@ -90,12 +91,14 @@ fn extract_article(html: &str, url: &str) -> Option<String> {
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    fn name(&self) -> &'static str {
-        "web_fetch"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("web_fetch")
     }
 
-    fn description(&self) -> &'static str {
-        "Fetch a URL over HTTP(S) and return the extracted main article text (readability), stripping navigation/ads/scripts. Long pages are truncated. Network access may prompt for confirmation."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Fetch a URL over HTTP(S) and return the extracted main article text (readability), stripping navigation/ads/scripts. Long pages are truncated. Network access may prompt for confirmation.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

@@ -53,7 +53,9 @@ pub fn classify(s: &str) -> Input {
 }
 
 pub async fn run_interactive(cfg: &AppConfig, continue_: bool) -> Result<()> {
-    let (mut agent, _sys, provider) = build_agent(cfg, continue_)?;
+    // `_mcp` holds the live MCP child processes: it stays in scope for the whole
+    // loop, because dropping it would kill the servers behind the MCP tools.
+    let (mut agent, _sys, provider, _mcp) = build_agent(cfg, continue_).await?;
     let mut rl = Reedline::create();
     let prompt = CrabPrompt;
     println!("crab interactive. /quit to exit, Ctrl-C aborts the current run.");

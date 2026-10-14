@@ -269,11 +269,11 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl Tool for Noop {
-        fn name(&self) -> &'static str {
-            "noop"
+        fn name(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -431,11 +431,11 @@ mod bridge_tests {
     struct Noop;
     #[async_trait]
     impl Tool for Noop {
-        fn name(&self) -> &'static str {
-            "noop"
+        fn name(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -536,11 +536,11 @@ mod system_prompt_tests {
     struct Noop;
     #[async_trait]
     impl Tool for Noop {
-        fn name(&self) -> &'static str {
-            "noop"
+        fn name(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -615,11 +615,11 @@ mod abort_token_tests {
     struct Noop;
     #[async_trait]
     impl Tool for Noop {
-        fn name(&self) -> &'static str {
-            "noop"
+        fn name(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -679,11 +679,11 @@ mod continue_history_tests {
     struct Noop;
     #[async_trait]
     impl Tool for Noop {
-        fn name(&self) -> &'static str {
-            "noop"
+        fn name(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})

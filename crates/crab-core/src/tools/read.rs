@@ -1,6 +1,7 @@
 use crate::state::SessionState;
 use crate::tool::{Tool, ToolError};
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 const MAX_BYTES: usize = 100_000;
@@ -17,12 +18,14 @@ impl ReadTool {
 
 #[async_trait]
 impl Tool for ReadTool {
-    fn name(&self) -> &'static str {
-        "read"
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("read")
     }
 
-    fn description(&self) -> &'static str {
-        "Read a UTF-8 text file. Returns contents (truncated past 100KB with a notice). Records the file as read for the freshness gate, so edit/write can detect external changes."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Read a UTF-8 text file. Returns contents (truncated past 100KB with a notice). Records the file as read for the freshness gate, so edit/write can detect external changes.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {
