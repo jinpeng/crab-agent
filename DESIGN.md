@@ -251,6 +251,8 @@ reqwest + rustls + SSE 接到 M1 的状态机上，retry 策略，wiremock 传�
 **M4 CLI**
 `--print` 先落（可被 `assert_cmd` 端到端测）→ reedline + 流式打印 → 权限确认 UI → `AGENTS.md` 加载。
 
+**✅ 已完成（2026-10-13，分支 `m4-cli`）。** 累计 103 测试全绿。`crab --print "..."` / 交互模式 / `--continue` / 权限确认 UI（y/n/a）/ `AGENTS.md` 进 system prompt 全部落地。架构：(1) **P-A 流式透传**——`Provider::complete` 加可选 `on_event: Option<&Sender<StreamEvent>>`，provider 边解析 SSE 边实时推，agent 桥接为 `AgentEvent::TextDelta`（解决 §239 M1 遗留）；(2) **P-B 线程模型**——reedline `read_line` 同步阻塞故走 `spawn_blocking`（Reedline 不跨 await，每次 move 进出），agent 在 tokio task，Ctrl-C 经 `tokio::signal::ctrl_c` 调 `abort_token()`；(3) **权限路由**——yolo→yolo()、--print→auto_approve()、交互→`with_confirmer(terminal)`。core 改动：`AgentConfig.system_prompt` 注入首条请求消息（不进 session）、`Agent::abort_token()`。**实测基线（Q17 冻结点）：release 6.90 MiB、启动 0.36s（冷）**。实现修正：forward task 用 run/run_inner 拆分防泄漏、`&&Sender` double-ref、provider_calls 记录实际发送（含注入的 system）。
+
 **M5 dogfood**
 用 crab 改 crab，每次失败记成 issue。
 

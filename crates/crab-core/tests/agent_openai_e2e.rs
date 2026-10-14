@@ -61,7 +61,10 @@ async fn agent_drives_real_read_tool_via_openai_provider() {
         Box::new(provider),
         tools,
         session,
-        AgentConfig { max_turns: 10 },
+        AgentConfig {
+            max_turns: 10,
+            ..Default::default()
+        },
     );
 
     let reason = agent.run("read the note".into()).await.unwrap();

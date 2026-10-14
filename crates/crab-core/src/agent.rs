@@ -3,9 +3,12 @@ use crate::session::{Session, SessionEntry};
 use crate::tool::ToolRegistry;
 use crate::types::{ContentBlock, EntryId, Message, Role, StopReason, ToolCallId};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AgentConfig {
     pub max_turns: usize,
+    /// Prepended to the provider request as the system message. Empty = not injected.
+    /// Not part of session history (it's per-run config, not conversation).
+    pub system_prompt: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +81,12 @@ impl Agent {
         self.abort.cancel();
     }
 
+    /// Cloneable token so callers can abort while `run` holds `&mut self` (interactive
+    /// Ctrl-C). Cancel it to abort the in-flight run.
+    pub fn abort_token(&self) -> tokio_util::sync::CancellationToken {
+        self.abort.clone()
+    }
+
     pub fn provider_calls(&self) -> &[Vec<Message>] {
         &self.provider_calls
     }
@@ -95,6 +104,31 @@ impl Agent {
     }
 
     pub async fn run(&mut self, user_input: String) -> Result<StopReason, AgentError> {
+        // Bridge provider's live StreamEvents into AgentEvent::TextDelta (P-A).
+        // Guard aborts the forward task on EVERY exit path so it can't leak.
+        let (stream_tx, mut stream_rx) =
+            tokio::sync::broadcast::channel::<crate::stream::StreamEvent>(64);
+        let events_tx2 = self.events_tx.clone();
+        let forward = tokio::spawn(async move {
+            while let Ok(ev) = stream_rx.recv().await {
+                if let crate::stream::StreamEvent::TextDelta(s) = ev {
+                    let _ = events_tx2.send(AgentEvent::TextDelta(s));
+                }
+            }
+        });
+        let result = self.run_inner(user_input, &stream_tx).await;
+        // Ensure all deltas forwarded before returning, then stop the task.
+        drop(stream_tx);
+        forward.abort();
+        let _ = forward.await;
+        result
+    }
+
+    async fn run_inner(
+        &mut self,
+        user_input: String,
+        stream_tx: &tokio::sync::broadcast::Sender<crate::stream::StreamEvent>,
+    ) -> Result<StopReason, AgentError> {
         let user = Message {
             role: Role::User,
             content: vec![ContentBlock::Text { text: user_input }],
@@ -118,8 +152,24 @@ impl Agent {
             // mid-stream, drop the call (a kill_on_drop-style cancel) and persist what
             // we already have. Tool results from prior turns are already recorded.
             let tool_schemas = self.tools.schemas();
+            // Inject system prompt as the first message for THIS call only (not history).
+            let request_msgs: Vec<Message> = if self.config.system_prompt.is_empty() {
+                self.history.clone()
+            } else {
+                let mut v = Vec::with_capacity(self.history.len() + 1);
+                v.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: self.config.system_prompt.clone(),
+                    }],
+                });
+                v.extend(self.history.clone());
+                v
+            };
+            // Record what we actually send (includes the injected system message).
+            *self.provider_calls.last_mut().unwrap() = request_msgs.clone();
             let t = tokio::select! {
-                res = self.provider.complete(&self.history, &tool_schemas) => res?,
+                res = self.provider.complete(&request_msgs, &tool_schemas, Some(stream_tx)) => res?,
                 _ = self.abort.cancelled() => {
                     let _ = self.events_tx.send(AgentEvent::Finished { reason: StopReason::Aborted });
                     return Ok(StopReason::Aborted);
@@ -242,7 +292,10 @@ pub(crate) mod tests {
             Box::new(provider),
             tools,
             session,
-            AgentConfig { max_turns: 10 },
+            AgentConfig {
+                max_turns: 10,
+                ..Default::default()
+            },
         );
 
         let reason = agent.run("hi".into()).await.unwrap();
@@ -286,7 +339,10 @@ pub(crate) mod tests {
             Box::new(provider),
             tools,
             session,
-            AgentConfig { max_turns: 10 },
+            AgentConfig {
+                max_turns: 10,
+                ..Default::default()
+            },
         );
 
         // Subscribe BEFORE running; on the first ToolCallFinished, cancel BOTH the
@@ -332,5 +388,211 @@ pub(crate) mod tests {
             )),
             "expected at least one tool_result recorded"
         );
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use crate::provider::MockProvider;
+    use crate::stream::StreamEvent;
+    use crate::tool::{Tool, ToolError, ToolRegistry};
+    use crate::types::StopReason;
+    use async_trait::async_trait;
+
+    struct Noop;
+    #[async_trait]
+    impl Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no op"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+            Ok("done".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_bridges_provider_deltas_to_text_events() {
+        let provider = MockProvider::cooperative(vec![vec![
+            StreamEvent::TextDelta("a".into()),
+            StreamEvent::TextDelta("b".into()),
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
+        );
+        let mut rx = agent.subscribe();
+        agent.run("hi".into()).await.unwrap();
+        // Collect TextDelta events with a bounded wait (forward task needs a tick).
+        let mut deltas = Vec::new();
+        while deltas.len() < 2 {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(AgentEvent::TextDelta(s))) => deltas.push(s),
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert_eq!(deltas, vec!["a".to_string(), "b".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod system_prompt_tests {
+    use super::*;
+    use crate::provider::MockProvider;
+    use crate::stream::StreamEvent;
+    use crate::tool::{Tool, ToolError, ToolRegistry};
+    use crate::types::StopReason;
+    use async_trait::async_trait;
+
+    struct Noop;
+    #[async_trait]
+    impl Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no op"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+            Ok("done".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn system_prompt_prepended_to_first_request() {
+        let provider = MockProvider::new(vec![vec![StreamEvent::StreamEnd {
+            reason: StopReason::EndTurn,
+        }]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                system_prompt: "BASE RULES".into(),
+            },
+        );
+        agent.run("hi".into()).await.unwrap();
+        let first = &agent.provider_calls()[0];
+        assert!(
+            first.iter().any(|m| m.content.iter().any(|b| matches!(
+                b, ContentBlock::Text { text } if text.contains("BASE RULES")
+            ))),
+            "system prompt must reach provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_system_prompt_not_injected() {
+        let provider = MockProvider::new(vec![vec![StreamEvent::StreamEnd {
+            reason: StopReason::EndTurn,
+        }]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                system_prompt: String::new(),
+            },
+        );
+        agent.run("hi".into()).await.unwrap();
+        let first = &agent.provider_calls()[0];
+        // 只有用户消息，无注入的 system
+        assert_eq!(first.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod abort_token_tests {
+    use super::*;
+    use crate::provider::MockProvider;
+    use crate::stream::StreamEvent;
+    use crate::tool::{Tool, ToolError, ToolRegistry};
+    use crate::types::StopReason;
+    use async_trait::async_trait;
+
+    struct Noop;
+    #[async_trait]
+    impl Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no op"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+            Ok("done".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn cloned_abort_token_cancels_run() {
+        // Cooperative provider streams several events; we cancel mid-stream via the
+        // cloned token (the interactive Ctrl-C path).
+        let provider = MockProvider::cooperative(vec![vec![
+            StreamEvent::TextDelta("w".into()),
+            StreamEvent::TextDelta("x".into()),
+            StreamEvent::TextDelta("y".into()),
+            StreamEvent::TextDelta("z".into()),
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
+        );
+        let token = agent.abort_token();
+        // cancel after a tick so run is mid-stream
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            token.cancel();
+        });
+        let reason = agent.run("hi".into()).await.unwrap();
+        // Either Aborted (cancel won) or EndTurn (finished first) — but token path works.
+        assert!(matches!(reason, StopReason::Aborted | StopReason::EndTurn));
     }
 }

@@ -113,10 +113,11 @@ impl Provider for OpenAiProvider {
         &self,
         messages: &[Message],
         tools: &[serde_json::Value],
+        on_event: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
     ) -> Result<AssistantTurn, ProviderError> {
         let mut attempt = 0u32;
         loop {
-            match self.complete_once(messages, tools).await {
+            match self.complete_once(messages, tools, on_event).await {
                 Ok(t) => return Ok(t),
                 Err(ProviderError::Api { status, body }) if status == 429 || status >= 500 => {
                     attempt += 1;
@@ -153,6 +154,7 @@ impl OpenAiProvider {
         &self,
         messages: &[Message],
         tools: &[serde_json::Value],
+        on_event: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
     ) -> Result<AssistantTurn, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let resp = self
@@ -180,6 +182,10 @@ impl OpenAiProvider {
                 Ok(event) => {
                     for se in parse_chunk(&event.data)? {
                         let is_end = matches!(se, StreamEvent::StreamEnd { .. });
+                        // Live-push each event before accumulating (P-A side channel).
+                        if let Some(tx) = on_event {
+                            let _ = tx.send(se.clone());
+                        }
                         acc.push(se);
                         if is_end {
                             break 'outer; // finish_reason reached: stop consuming the stream
@@ -230,7 +236,7 @@ mod tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "sk-test", "gpt-4o-mini");
-        let turn = p.complete(&[user("hey")], &[]).await.unwrap();
+        let turn = p.complete(&[user("hey")], &[], None).await.unwrap();
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         match &turn.message.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "hi"),
@@ -287,7 +293,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
-        let turn = p.complete(&[user("x")], &[]).await.unwrap();
+        let turn = p.complete(&[user("x")], &[], None).await.unwrap();
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         assert_eq!(n.load(Ordering::SeqCst), 3); // 2 fail + 1 ok
     }
@@ -300,7 +306,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(2);
-        let r = p.complete(&[user("x")], &[]).await;
+        let r = p.complete(&[user("x")], &[], None).await;
         assert!(matches!(
             r,
             Err(ProviderError::Retryable(_)) | Err(ProviderError::Api { .. })
@@ -329,7 +335,7 @@ mod retry_tests {
             .mount(&server)
             .await;
         let p = OpenAiProvider::new(server.uri(), "k", "m").with_max_retries(3);
-        let _turn = p.complete(&[user("x")], &[]).await.unwrap();
+        let _turn = p.complete(&[user("x")], &[], None).await.unwrap();
         assert_eq!(n.load(Ordering::SeqCst), 1, "stream started = no retry");
     }
 }
@@ -441,7 +447,7 @@ mod tools_in_request_tests {
             "name": "read", "description": "read a file",
             "parameters": {"type":"object","properties":{"path":{"type":"string"}}}
         })];
-        p.complete(&msgs, &tools).await.unwrap();
+        p.complete(&msgs, &tools, None).await.unwrap();
 
         let body = &seen.lock().unwrap()[0];
         assert!(
@@ -465,8 +471,48 @@ mod tools_in_request_tests {
             role: Role::User,
             content: vec![ContentBlock::Text { text: "hi".into() }],
         }];
-        p.complete(&msgs, &[]).await.unwrap();
+        p.complete(&msgs, &[], None).await.unwrap();
         let body = &seen.lock().unwrap()[0];
         assert!(body.get("tools").is_none(), "no tools = no tools field");
+    }
+}
+
+#[cfg(test)]
+mod stream_passthrough_tests {
+    use super::*;
+    use crate::provider::Provider;
+    use crate::stream::StreamEvent;
+    use crate::types::{ContentBlock, Message, Role};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user(t: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: t.into() }],
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_streams_deltas_to_on_event() {
+        let server = MockServer::start().await;
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m");
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let _ = p.complete(&[user("x")], &[], Some(&tx)).await.unwrap();
+        drop(tx);
+        let mut deltas = Vec::new();
+        while let Ok(StreamEvent::TextDelta(s)) = rx.recv().await {
+            deltas.push(s);
+        }
+        assert_eq!(deltas, vec!["he".to_string(), "llo".to_string()]);
     }
 }
