@@ -10,10 +10,28 @@ pub struct ProviderProfile {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl McpServerConfig {
+    /// Servers are enabled unless explicitly disabled (`enabled = false`).
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub default_provider: Option<String>,
     #[serde(default)]
     pub providers: HashMap<String, ProviderProfile>,
+    #[serde(default)]
+    pub mcp: std::collections::HashMap<String, McpServerConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -191,6 +209,40 @@ model = "qwen"
     #[test]
     fn bad_toml_errors() {
         assert!(Config::from_toml("[[[invalid").is_err());
+    }
+
+    #[test]
+    fn parses_mcp_servers() {
+        let c = Config::from_toml(
+            r#"
+[mcp.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[mcp.off]
+command = "some-server"
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.mcp.len(), 2);
+
+        let fs = c.mcp.get("filesystem").unwrap();
+        assert_eq!(fs.command, "npx");
+        assert_eq!(fs.args.len(), 3);
+        assert_eq!(fs.args[1], "@modelcontextprotocol/server-filesystem");
+        assert!(fs.is_enabled());
+
+        let off = c.mcp.get("off").unwrap();
+        assert_eq!(off.command, "some-server");
+        assert!(off.args.is_empty());
+        assert!(!off.is_enabled());
+    }
+
+    #[test]
+    fn no_mcp_section_is_empty() {
+        let c = Config::from_toml("").unwrap();
+        assert!(c.mcp.is_empty());
     }
 }
 
