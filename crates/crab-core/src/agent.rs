@@ -27,6 +27,10 @@ pub enum AgentEvent {
         turn: usize,
     },
     TextDelta(String),
+    Usage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
     AssistantMessage(Message),
     ToolCallStarted {
         id: ToolCallId,
@@ -113,15 +117,27 @@ impl Agent {
     }
 
     pub async fn run(&mut self, user_input: String) -> Result<StopReason, AgentError> {
-        // Bridge provider's live StreamEvents into AgentEvent::TextDelta (P-A).
+        // Bridge provider's live StreamEvents into AgentEvents (P-A).
         // Guard aborts the forward task on EVERY exit path so it can't leak.
         let (stream_tx, mut stream_rx) =
             tokio::sync::broadcast::channel::<crate::stream::StreamEvent>(64);
         let events_tx2 = self.events_tx.clone();
         let forward = tokio::spawn(async move {
             while let Ok(ev) = stream_rx.recv().await {
-                if let crate::stream::StreamEvent::TextDelta(s) = ev {
-                    let _ = events_tx2.send(AgentEvent::TextDelta(s));
+                match ev {
+                    crate::stream::StreamEvent::TextDelta(s) => {
+                        let _ = events_tx2.send(AgentEvent::TextDelta(s));
+                    }
+                    crate::stream::StreamEvent::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                    } => {
+                        let _ = events_tx2.send(AgentEvent::Usage {
+                            prompt_tokens,
+                            completion_tokens,
+                        });
+                    }
+                    _ => {}
                 }
             }
         });
@@ -460,6 +476,48 @@ mod bridge_tests {
             }
         }
         assert_eq!(deltas, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn agent_emits_usage_event() {
+        let provider = MockProvider::cooperative(vec![vec![
+            StreamEvent::TextDelta("hi".into()),
+            StreamEvent::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+            },
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            session,
+            AgentConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
+        );
+        let mut rx = agent.subscribe();
+        agent.run("hi".into()).await.unwrap();
+        // Collect Usage events with a bounded wait (forward task needs a tick).
+        let mut usage = None;
+        while usage.is_none() {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(AgentEvent::Usage {
+                    prompt_tokens,
+                    completion_tokens,
+                })) => usage = Some((prompt_tokens, completion_tokens)),
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert_eq!(usage, Some((10, 5)));
     }
 }
 
