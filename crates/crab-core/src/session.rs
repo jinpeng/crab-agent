@@ -44,6 +44,11 @@ impl Session {
         &self.entries
     }
 
+    /// Number of entries in the session.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Rebuild from a JSONL file (for --continue). Parses line by line; any bad line errors.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let raw = std::fs::read_to_string(path)?;
@@ -168,6 +173,17 @@ mod tests {
         let mut loaded = Session::load(&path).unwrap();
         let id = loaded.append(msg("c")).unwrap();
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn len_tracks_number_of_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        assert_eq!(s.len(), 0);
+        s.append(msg("a")).unwrap();
+        s.append(msg("b")).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.len(), s.entries().len());
     }
 
     #[test]
