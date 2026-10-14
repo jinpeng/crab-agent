@@ -4,6 +4,10 @@ mod app;
 mod confirm;
 mod interactive;
 mod render;
+// TODO: used by interactive.rs once it renders the bottom status line;
+// until then, silence dead_code.
+#[allow(dead_code)]
+mod status;
 // TODO: used by render.rs once it consumes the theme; until then, silence dead_code.
 #[allow(dead_code)]
 mod theme;
