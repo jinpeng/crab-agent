@@ -25,3 +25,6 @@ rustc-ice-*.txt
 
 # local git worktrees
 .worktrees/
+
+# crab runtime sessions
+.crab/

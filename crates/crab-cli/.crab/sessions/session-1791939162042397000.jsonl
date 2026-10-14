@@ -1,2 +1,0 @@
-{"kind":"message","id":0,"parent_id":null,"message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
-{"kind":"message","id":1,"parent_id":0,"message":{"role":"assistant","content":[{"type":"text","text":"mock response"}]}}
