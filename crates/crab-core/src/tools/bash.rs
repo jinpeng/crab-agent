@@ -85,8 +85,10 @@ impl Tool for BashTool {
         Cow::Borrowed("bash")
     }
 
-    fn description(&self) -> &'static str {
-        "Run a shell command. Times out after 120s. Long output is truncated keeping head and tail. Read-only commands (ls/cat/git status/...) may run without confirmation; anything else may prompt."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Run a shell command. Times out after 120s. Long output is truncated keeping head and tail. Read-only commands (ls/cat/git status/...) may run without confirmation; anything else may prompt.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

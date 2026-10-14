@@ -95,8 +95,10 @@ impl Tool for WebFetchTool {
         Cow::Borrowed("web_fetch")
     }
 
-    fn description(&self) -> &'static str {
-        "Fetch a URL over HTTP(S) and return the extracted main article text (readability), stripping navigation/ads/scripts. Long pages are truncated. Network access may prompt for confirmation."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Fetch a URL over HTTP(S) and return the extracted main article text (readability), stripping navigation/ads/scripts. Long pages are truncated. Network access may prompt for confirmation.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

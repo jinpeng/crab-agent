@@ -22,8 +22,10 @@ impl Tool for ReadTool {
         Cow::Borrowed("read")
     }
 
-    fn description(&self) -> &'static str {
-        "Read a UTF-8 text file. Returns contents (truncated past 100KB with a notice). Records the file as read for the freshness gate, so edit/write can detect external changes."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Read a UTF-8 text file. Returns contents (truncated past 100KB with a notice). Records the file as read for the freshness gate, so edit/write can detect external changes.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

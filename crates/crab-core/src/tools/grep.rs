@@ -43,9 +43,11 @@ impl Tool for GrepTool {
         Cow::Borrowed("grep")
     }
 
-    fn description(&self) -> &'static str {
-        "Search file contents by regex. Returns `path:line:content` per match (max 200). \
-         Respects .gitignore/.ignore and skips hidden files and directories."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Search file contents by regex. Returns `path:line:content` per match (max 200). \
+         Respects .gitignore/.ignore and skips hidden files and directories.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

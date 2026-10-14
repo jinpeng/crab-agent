@@ -99,8 +99,10 @@ impl Tool for EditTool {
         Cow::Borrowed("edit")
     }
 
-    fn description(&self) -> &'static str {
-        "Apply exact-match edits to a file. Each edit's `old` must match the file EXACTLY once (literal, no whitespace tolerance) and edits must not overlap; all edits match against the original content and apply atomically (all-or-nothing). The file must have been read this session and be unchanged since."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Apply exact-match edits to a file. Each edit's `old` must match the file EXACTLY once (literal, no whitespace tolerance) and edits must not overlap; all edits match against the original content and apply atomically (all-or-nothing). The file must have been read this session and be unchanged since.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

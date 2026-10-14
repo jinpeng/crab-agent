@@ -32,8 +32,10 @@ impl Tool for WriteTool {
         Cow::Borrowed("write")
     }
 
-    fn description(&self) -> &'static str {
-        "Write a file (created if missing, overwritten if present). Overwriting requires the file was read this session and is unchanged since (freshness gate). Writes are atomic."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Write a file (created if missing, overwritten if present). Overwriting requires the file was read this session and is unchanged since (freshness gate). Writes are atomic.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {

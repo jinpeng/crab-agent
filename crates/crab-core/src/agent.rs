@@ -272,8 +272,8 @@ pub(crate) mod tests {
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -434,8 +434,8 @@ mod bridge_tests {
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -539,8 +539,8 @@ mod system_prompt_tests {
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -618,8 +618,8 @@ mod abort_token_tests {
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
@@ -682,8 +682,8 @@ mod continue_history_tests {
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed("noop")
         }
-        fn description(&self) -> &'static str {
-            "no op"
+        fn description(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("no op")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})

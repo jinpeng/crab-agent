@@ -15,7 +15,10 @@ pub enum ToolError {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> Cow<'static, str>;
-    fn description(&self) -> &'static str;
+    /// Human-readable description for the model's tool list. A `Cow` rather
+    /// than `&'static str` because tools discovered at runtime (e.g. MCP
+    /// servers, whose descriptions ship with the listing) carry owned text.
+    fn description(&self) -> Cow<'static, str>;
     fn schema(&self) -> serde_json::Value;
     async fn execute(&self, args: serde_json::Value) -> Result<String, ToolError>;
 }
@@ -71,8 +74,8 @@ mod tests {
         fn name(&self) -> Cow<'static, str> {
             Cow::Borrowed("echo")
         }
-        fn description(&self) -> &'static str {
-            "echo back input.text"
+        fn description(&self) -> Cow<'static, str> {
+            Cow::Borrowed("echo back input.text")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}})
@@ -107,8 +110,8 @@ mod tests {
         fn name(&self) -> Cow<'static, str> {
             Cow::Owned("srv__tool".to_string())
         }
-        fn description(&self) -> &'static str {
-            "dynamically named"
+        fn description(&self) -> Cow<'static, str> {
+            Cow::Borrowed("dynamically named")
         }
         fn schema(&self) -> serde_json::Value {
             serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}})

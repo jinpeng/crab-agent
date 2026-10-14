@@ -45,8 +45,10 @@ impl Tool for GlobTool {
         Cow::Borrowed("glob")
     }
 
-    fn description(&self) -> &'static str {
-        "Find files by glob pattern (e.g. \"**/*.rs\"). Returns matching paths relative to root, one per line."
+    fn description(&self) -> Cow<'static, str> {
+        Cow::Borrowed(
+            "Find files by glob pattern (e.g. \"**/*.rs\"). Returns matching paths relative to root, one per line.",
+        )
     }
 
     fn schema(&self) -> serde_json::Value {
