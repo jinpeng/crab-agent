@@ -20,4 +20,5 @@
 - 任务: 给 Session 加 `pub fn len(&self) -> usize` 返回 entry 数 + 单元测试，跑测试确认通过
 - 结果: **成功** — Q2 验收达成
 - commit: f3fec8e
+- 暴露的 crab 缺陷: 模型不知道 Rust 惯例 `len_without_is_empty`（加 `len()` 不加 `is_empty()`），clippy `-D warnings` 在 CI/review 抓到，手工补 `is_empty()`（commit a582500）。**prompt 改进点**：BASE_PROMPT 或 AGENTS.md 可加一条"遵循 Rust API 惯例（len 配 is_empty 等），改动后跑 `cargo clippy --all-targets -- -D warnings`"。
 - （过程细节待补：权限确认次数 / edit 是否一次过 / 卡点）
