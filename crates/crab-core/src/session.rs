@@ -49,6 +49,11 @@ impl Session {
         self.entries.len()
     }
 
+    /// Whether the session has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Rebuild from a JSONL file (for --continue). Parses line by line; any bad line errors.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let raw = std::fs::read_to_string(path)?;
