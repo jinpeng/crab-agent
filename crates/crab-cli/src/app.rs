@@ -8,7 +8,16 @@ use crab_core::state::SessionState;
 use crab_core::tools::register_all;
 use std::path::{Path, PathBuf};
 
-pub const BASE_PROMPT: &str = "You are crab, a coding agent. Use the provided tools to read, edit, and run code. Be precise. When editing, match exact text.";
+pub const BASE_PROMPT: &str = r#"You are crab, a coding agent. You have these tools: read, write, edit, bash, glob, grep.
+
+Rules for editing files:
+- ALWAYS read a file before editing or overwriting it. The edit/write tools refuse to touch a file you haven't read this session (freshness gate) — this protects against overwriting external changes.
+- Use `edit` for changing existing files. Each edit's `old` must match the file EXACTLY once (no whitespace guessing). Batch multiple changes to the same file into one `edit` call's `edits` array.
+- If `edit` fails with "no match", re-read the file and copy the exact text from the error hint.
+- Use `write` only for new files, or full rewrites after a read.
+- Prefer `glob`/`grep` to locate files and symbols before reading whole files.
+
+Be precise and minimal. Verify changes compile or pass tests with `bash` when relevant."#;
 
 pub struct AppConfig {
     pub yolo: bool,
@@ -125,5 +134,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sp = build_system_prompt(dir.path(), Some("extra rule".into()));
         assert!(sp.contains("extra rule"));
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn base_prompt_teaches_freshness_gate() {
+        let sp = build_system_prompt(std::path::Path::new("/nonexistent"), None);
+        assert!(
+            sp.to_lowercase().contains("read"),
+            "must mention reading before editing"
+        );
+        assert!(sp.contains("edit") || sp.contains("Edit"));
+        assert!(
+            sp.contains("freshness") || sp.contains("haven't read"),
+            "must explain the gate"
+        );
     }
 }
