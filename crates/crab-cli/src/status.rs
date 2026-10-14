@@ -77,6 +77,11 @@ impl StatusLine {
         self.context_window = window;
     }
 
+    /// The configured context window, if any.
+    pub fn context_window(&self) -> Option<u64> {
+        self.context_window
+    }
+
     /// Render the line, clipped to `width` visible columns.
     ///
     /// Shape (leading and trailing spaces included):

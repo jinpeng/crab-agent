@@ -25,35 +25,6 @@ const OK_MARKER: &str = "✓";
 /// Marker of a tool call that failed.
 const ERR_MARKER: &str = "✗";
 
-/// Stream agent events to stdout until the run finishes or the channel closes.
-///
-/// `TextDelta` is printed as-is in the default color and without an added
-/// newline. A tool call opens with a cyan `● <name>` line and closes with a
-/// green `✓` (or red `✗`) line carrying the first line of the result, dimmed
-/// and truncated to the terminal width. `Finished` ends the line.
-///
-/// This is the *interactive* variant: it stops at `Finished`, because there the
-/// agent outlives the run and waiting for the channel to close would block the
-/// next prompt forever. `--print` uses [`render_events_until_closed`].
-pub async fn render_events(mut rx: tokio::sync::broadcast::Receiver<AgentEvent>) {
-    let theme = Theme::dark();
-    let mut out = std::io::stdout();
-    loop {
-        match rx.recv().await {
-            Ok(AgentEvent::Finished { .. }) => {
-                let _ = writeln!(out);
-                let _ = out.flush();
-                break;
-            }
-            Ok(ev) => render_event(&mut out, &theme, &ev),
-            // Lagged only means events were skipped, not that the run ended:
-            // keep draining instead of going dark mid-run.
-            Err(RecvError::Lagged(_)) => {}
-            Err(RecvError::Closed) => break,
-        }
-    }
-}
-
 /// Stream agent events to stdout until the *channel closes*, i.e. until every
 /// sender is gone.
 ///
@@ -107,6 +78,76 @@ fn render_event(out: &mut impl Write, theme: &Theme, ev: &AgentEvent) {
         _ => return,
     }
     let _ = out.flush();
+}
+
+/// Render events with a live status line drawn as the last content line while the
+/// agent runs, and cleared before control returns to the reedline prompt.
+///
+/// We deliberately avoid a persistent scroll-region status line: reedline owns the
+/// bottom row while waiting for input, so a fixed line would fight it. Instead the
+/// status line is drawn in place below the content during the run and erased when
+/// the run ends.
+pub async fn render_events_with_status(
+    mut rx: tokio::sync::broadcast::Receiver<AgentEvent>,
+    mut status: crate::status::StatusLine,
+) {
+    let theme = Theme::dark();
+    let mut out = std::io::stdout();
+    let mut drawn = false; // is the status line currently the last printed line?
+
+    loop {
+        let ev = match rx.recv().await {
+            Ok(ev) => ev,
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => break,
+        };
+
+        // Erase the in-place status line (if any) so content prints over it.
+        if std::mem::take(&mut drawn) {
+            let _ = write!(out, "\x1b[1A\r\x1b[2K");
+        }
+
+        let is_end = matches!(ev, AgentEvent::Finished { .. });
+        update_status(&mut status, &ev);
+        render_event(&mut out, &theme, &ev);
+
+        if is_end {
+            let _ = writeln!(out);
+            break; // leave a clean line for the reedline prompt
+        }
+        // Redraw the status line below the fresh content.
+        let _ = writeln!(out);
+        draw_status(&mut out, &theme, &status);
+        drawn = true;
+    }
+    let _ = out.flush();
+}
+
+fn draw_status(out: &mut impl Write, theme: &Theme, status: &crate::status::StatusLine) {
+    let line = status.format(terminal_width());
+    let _ = write!(out, "{}", theme.dim(&line));
+    let _ = out.flush();
+}
+
+fn update_status(status: &mut crate::status::StatusLine, ev: &AgentEvent) {
+    use crate::status::RunState;
+    match ev {
+        AgentEvent::TurnStarted { .. } | AgentEvent::TextDelta(_) => {
+            status.set_state(RunState::Streaming)
+        }
+        AgentEvent::ToolCallStarted { .. } => status.set_state(RunState::WaitingTool),
+        AgentEvent::ToolCallFinished { .. } => status.set_state(RunState::Streaming),
+        AgentEvent::Usage {
+            prompt_tokens,
+            completion_tokens,
+        } => {
+            let used = (*prompt_tokens + *completion_tokens) as u64;
+            status.set_tokens_used(used);
+            status.set_context(Some(used), status.context_window());
+        }
+        AgentEvent::Finished { .. } => status.set_state(RunState::Idle),
+        _ => {}
+    }
 }
 
 /// Render a structured tool call block: the cyan `● <name> <args>` header line

@@ -1,5 +1,6 @@
 use crate::app::{AppConfig, build_agent};
-use crate::render::render_events;
+use crate::render::render_events_with_status;
+use crate::status::StatusLine;
 use anyhow::Result;
 use reedline::{DefaultPrompt, Reedline, Signal};
 
@@ -20,7 +21,7 @@ pub fn classify(s: &str) -> Input {
 }
 
 pub async fn run_interactive(cfg: &AppConfig, continue_: bool) -> Result<()> {
-    let (mut agent, _sys, _provider) = build_agent(cfg, continue_)?;
+    let (mut agent, _sys, provider) = build_agent(cfg, continue_)?;
     let mut rl = Reedline::create();
     let prompt = DefaultPrompt::default();
     println!("crab interactive. /quit to exit, Ctrl-C aborts the current run.");
@@ -45,7 +46,14 @@ pub async fn run_interactive(cfg: &AppConfig, continue_: bool) -> Result<()> {
                 Input::Skip => continue,
                 Input::Message(m) => {
                     let rx = agent.subscribe();
-                    let render = tokio::spawn(render_events(rx));
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    let status = StatusLine::new(
+                        format!("{}/{}", provider.provider_name, provider.model),
+                        cwd,
+                    );
+                    let mut status = status;
+                    status.set_context(None, provider.context_window);
+                    let render = tokio::spawn(render_events_with_status(rx, status));
                     let abort = agent.abort_token();
                     let run = agent.run(m);
                     tokio::pin!(run);
