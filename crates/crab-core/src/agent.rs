@@ -61,12 +61,21 @@ impl Agent {
         config: AgentConfig,
     ) -> Self {
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
+        // Restore conversation history from a loaded session (--continue). A freshly
+        // created session has no entries → empty history. (Fixes continue amnesia.)
+        let history: Vec<Message> = session
+            .entries()
+            .iter()
+            .map(|e| match e {
+                crate::session::SessionEntry::Message { message, .. } => message.clone(),
+            })
+            .collect();
         Self {
             provider,
             tools,
             session,
             config,
-            history: Vec::new(),
+            history,
             abort: tokio_util::sync::CancellationToken::new(),
             events_tx,
             provider_calls: Vec::new(),
@@ -594,5 +603,98 @@ mod abort_token_tests {
         let reason = agent.run("hi".into()).await.unwrap();
         // Either Aborted (cancel won) or EndTurn (finished first) — but token path works.
         assert!(matches!(reason, StopReason::Aborted | StopReason::EndTurn));
+    }
+}
+
+#[cfg(test)]
+mod continue_history_tests {
+    use super::*;
+    use crate::provider::MockProvider;
+    use crate::stream::StreamEvent;
+    use crate::tool::{Tool, ToolError, ToolRegistry};
+    use crate::types::StopReason;
+    use async_trait::async_trait;
+
+    struct Noop;
+    #[async_trait]
+    impl Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no op"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+            Ok("done".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn continued_session_restores_history_to_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path;
+        {
+            let provider = MockProvider::new(vec![vec![
+                StreamEvent::TextDelta("first answer".into()),
+                StreamEvent::StreamEnd {
+                    reason: StopReason::EndTurn,
+                },
+            ]]);
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(Noop));
+            let session = crate::session::Session::create(dir.path()).unwrap();
+            path = session.path().to_path_buf();
+            let mut agent = Agent::new(
+                Box::new(provider),
+                tools,
+                session,
+                AgentConfig {
+                    max_turns: 5,
+                    ..Default::default()
+                },
+            );
+            agent.run("first question".into()).await.unwrap();
+        }
+        let provider2 = MockProvider::new(vec![vec![StreamEvent::StreamEnd {
+            reason: StopReason::EndTurn,
+        }]]);
+        let mut tools2 = ToolRegistry::new();
+        tools2.register(Box::new(Noop));
+        let session2 = crate::session::Session::load(&path).unwrap();
+        let mut agent2 = Agent::new(
+            Box::new(provider2),
+            tools2,
+            session2,
+            AgentConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
+        );
+        agent2.run("second question".into()).await.unwrap();
+
+        let first_call = &agent2.provider_calls()[0];
+        let texts: Vec<String> = first_call
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("first question")),
+            "history must include prior user msg"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("first answer")),
+            "history must include prior assistant msg"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("second question")),
+            "history must include new msg"
+        );
     }
 }
