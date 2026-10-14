@@ -16,6 +16,11 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Extra environment variables for the child process, e.g. the API key a
+    /// server like Brave Search needs (`BRAVE_API_KEY`). These are added to the
+    /// inherited environment, not instead of it.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 impl McpServerConfig {
@@ -237,6 +242,36 @@ enabled = false
         assert_eq!(off.command, "some-server");
         assert!(off.args.is_empty());
         assert!(!off.is_enabled());
+    }
+
+    #[test]
+    fn parses_mcp_server_env() {
+        let c = Config::from_toml(
+            r#"
+[mcp.brave]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-brave-search"]
+env = { BRAVE_API_KEY = "abc" }
+"#,
+        )
+        .unwrap();
+
+        let brave = c.mcp.get("brave").unwrap();
+        assert_eq!(brave.env.len(), 1);
+        assert_eq!(
+            brave.env.get("BRAVE_API_KEY").map(String::as_str),
+            Some("abc")
+        );
+
+        // Servers without an `env` table get an empty map, not a parse error.
+        let fs = Config::from_toml(
+            r#"
+[mcp.filesystem]
+command = "npx"
+"#,
+        )
+        .unwrap();
+        assert!(fs.mcp.get("filesystem").unwrap().env.is_empty());
     }
 
     #[test]

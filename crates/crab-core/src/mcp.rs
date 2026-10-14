@@ -82,9 +82,17 @@ impl std::fmt::Debug for McpClient {
 
 /// Build the child process for a server config. Kept separate from
 /// [`McpClient::spawn`] so the command wiring is unit-testable without spawning.
+///
+/// Configured `env` pairs are layered on top of the inherited environment: a
+/// server that needs a credential (`BRAVE_API_KEY`) reads it from its own
+/// process env, and putting the value here keeps the key out of `args`, where
+/// it would show up in `ps` output and in the permission-gate prompt.
 fn spawn_command(cfg: &McpServerConfig) -> Command {
     Command::new(&cfg.command).configure(|c| {
         c.args(&cfg.args);
+        for (key, value) in &cfg.env {
+            c.env(key, value);
+        }
     })
 }
 
@@ -442,6 +450,7 @@ mod tests {
             command: exe.to_string_lossy().into_owned(),
             args: helper_command_args(),
             enabled: Some(true),
+            env: Default::default(),
         }
     }
 
@@ -453,6 +462,7 @@ mod tests {
             command: "/nonexistent/crab-mcp-server-that-is-not-here".into(),
             args: vec![],
             enabled: Some(true),
+            env: Default::default(),
         };
         let err = McpClient::spawn("bogus", &cfg, PermissionGate::auto_approve())
             .await
@@ -473,6 +483,7 @@ mod tests {
             command: "/bin/cat".into(),
             args: vec![],
             enabled: Some(true),
+            env: Default::default(),
         };
         let err = McpClient::spawn("cat", &cfg, PermissionGate::auto_approve())
             .await
@@ -494,6 +505,7 @@ mod tests {
             command: "my-server".into(),
             args: vec!["--flag".into(), "value".into()],
             enabled: None,
+            env: Default::default(),
         };
         let cmd = spawn_command(&cfg);
         assert_eq!(cmd.as_std().get_program(), "my-server");
@@ -501,6 +513,55 @@ mod tests {
             cmd.as_std().get_args().collect::<Vec<_>>(),
             vec!["--flag", "value"]
         );
+    }
+
+    /// A server that needs a credential (Brave Search's `BRAVE_API_KEY`) gets it
+    /// from its own environment, which is where the server reads it. Asserted on
+    /// the built `Command` rather than on a running process: the point is the
+    /// wiring, and spawning would need a real key.
+    #[test]
+    fn command_carries_configured_env() {
+        let cfg = McpServerConfig {
+            command: "my-server".into(),
+            args: vec![],
+            enabled: None,
+            env: [
+                ("BRAVE_API_KEY".to_string(), "abc".to_string()),
+                ("OTHER_VAR".to_string(), "xyz".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let cmd = spawn_command(&cfg);
+        // A `HashMap` has no order, so compare as a map rather than a sequence.
+        let got: std::collections::HashMap<String, String> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.unwrap_or_default().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(got.get("BRAVE_API_KEY").map(String::as_str), Some("abc"));
+        assert_eq!(got.get("OTHER_VAR").map(String::as_str), Some("xyz"));
+        assert_eq!(got.len(), 2);
+    }
+
+    /// No `env` in the config must mean no override at all: the child inherits
+    /// the parent's environment (which is how `PATH` keeps working).
+    #[test]
+    fn command_without_env_only_inherits() {
+        let cfg = McpServerConfig {
+            command: "my-server".into(),
+            args: vec![],
+            enabled: None,
+            env: Default::default(),
+        };
+        let cmd = spawn_command(&cfg);
+        assert_eq!(cmd.as_std().get_envs().count(), 0);
     }
 
     #[test]
