@@ -51,10 +51,18 @@ async fn run_print(cli: &Cli, prompt: String) -> anyhow::Result<()> {
     let cfg = app::AppConfig::from(cli);
     let (mut agent, _sys, _provider) = app::build_agent(&cfg, cli.continue_)?;
     let rx = agent.subscribe();
-    let render = tokio::spawn(render::render_events(rx));
-    let reason = agent.run(prompt).await?;
+    // Render until the channel closes, not until `Finished`: the run loop and the
+    // provider→agent bridge task publish to the same channel, so a text delta can
+    // still be enqueued after `Finished` (and after the renderer read it).
+    let render = tokio::spawn(render::render_events_until_closed(rx));
+    let reason = agent.run(prompt).await;
+    // Dropping the agent drops the channel's last sender (`run` already finished and
+    // awaited its own bridge sender), which lets the renderer drain everything that
+    // was buffered and then exit. Await it on both paths — on the error path too —
+    // so the process never returns before stdout is flushed.
     drop(agent);
     let _ = render.await;
+    let reason = reason?;
     let _ = reason;
     Ok(())
 }

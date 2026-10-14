@@ -8,6 +8,8 @@
 
 use crab_core::agent::AgentEvent;
 use crossterm::terminal;
+use std::io::Write;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::theme::Theme;
 use crate::width::{truncate_to_width, visible_width};
@@ -29,39 +31,82 @@ const ERR_MARKER: &str = "✗";
 /// newline. A tool call opens with a cyan `● <name>` line and closes with a
 /// green `✓` (or red `✗`) line carrying the first line of the result, dimmed
 /// and truncated to the terminal width. `Finished` ends the line.
+///
+/// This is the *interactive* variant: it stops at `Finished`, because there the
+/// agent outlives the run and waiting for the channel to close would block the
+/// next prompt forever. `--print` uses [`render_events_until_closed`].
 pub async fn render_events(mut rx: tokio::sync::broadcast::Receiver<AgentEvent>) {
-    use std::io::Write;
     let theme = Theme::dark();
     let mut out = std::io::stdout();
     loop {
         match rx.recv().await {
-            Ok(AgentEvent::TextDelta(s)) => {
-                print!("{s}");
-                let _ = out.flush();
-            }
-            Ok(AgentEvent::ToolCallStarted { name, .. }) => {
-                // The event carries no args yet, so only the header line shows.
-                print!("\n{}", format_tool_call(&theme, &name, "", None, false));
-                let _ = out.flush();
-            }
-            Ok(AgentEvent::ToolCallFinished {
-                result, is_error, ..
-            }) => {
-                print!(
-                    "{}",
-                    tool_result(&theme, &result, is_error, terminal_width())
-                );
-                let _ = out.flush();
-            }
             Ok(AgentEvent::Finished { .. }) => {
-                println!();
+                let _ = writeln!(out);
+                let _ = out.flush();
                 break;
             }
-            Ok(_) => {}
-            // Channel closed or lagged: stop rendering.
-            Err(_) => break,
+            Ok(ev) => render_event(&mut out, &theme, &ev),
+            // Lagged only means events were skipped, not that the run ended:
+            // keep draining instead of going dark mid-run.
+            Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => break,
         }
     }
+}
+
+/// Stream agent events to stdout until the *channel closes*, i.e. until every
+/// sender is gone.
+///
+/// `--print` must not stop at `Finished`. The run loop (which publishes
+/// `Finished`) and the provider→agent bridge task (which publishes `TextDelta`)
+/// write to the same broadcast channel from different tasks, so a delta can be
+/// enqueued *after* `Finished` — including after this task has already read it.
+/// Only the channel closing proves that no further event can arrive, which is
+/// why the caller drops the agent (all senders) before awaiting this task. The
+/// closing newline is written last, so a straggler delta can never land after it.
+pub async fn render_events_until_closed(mut rx: tokio::sync::broadcast::Receiver<AgentEvent>) {
+    let theme = Theme::dark();
+    let mut out = std::io::stdout();
+    let mut finished = false;
+    loop {
+        match rx.recv().await {
+            // Don't break: drain the stragglers the bridge task may still add.
+            Ok(AgentEvent::Finished { .. }) => finished = true,
+            Ok(ev) => render_event(&mut out, &theme, &ev),
+            Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => break,
+        }
+    }
+    if finished {
+        let _ = writeln!(out);
+    }
+    let _ = out.flush();
+}
+
+/// Write one non-terminal event to `out` and flush, so a piped stdout sees each
+/// delta as it arrives. `Finished` is handled by the caller's loop.
+fn render_event(out: &mut impl Write, theme: &Theme, ev: &AgentEvent) {
+    match ev {
+        AgentEvent::TextDelta(s) => {
+            let _ = out.write_all(s.as_bytes());
+        }
+        AgentEvent::ToolCallStarted { name, .. } => {
+            // The event carries no args yet, so only the header line shows.
+            let _ = write!(out, "\n{}", format_tool_call(theme, name, "", None, false));
+        }
+        AgentEvent::ToolCallFinished {
+            result, is_error, ..
+        } => {
+            let _ = write!(
+                out,
+                "{}",
+                tool_result(theme, result, *is_error, terminal_width())
+            );
+        }
+        // `Finished` (handled by the caller) and events with no rendering yet.
+        _ => return,
+    }
+    let _ = out.flush();
 }
 
 /// Render a structured tool call block: the cyan `● <name> <args>` header line
