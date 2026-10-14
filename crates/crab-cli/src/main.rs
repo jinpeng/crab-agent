@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_print(cli: &Cli, prompt: String) -> anyhow::Result<()> {
     let cfg = app::AppConfig::from(cli);
-    let (mut agent, _sys) = app::build_agent(&cfg, cli.continue_)?;
+    let (mut agent, _sys, _provider) = app::build_agent(&cfg, cli.continue_)?;
     let rx = agent.subscribe();
     let render = tokio::spawn(render::render_events(rx));
     let reason = agent.run(prompt).await?;

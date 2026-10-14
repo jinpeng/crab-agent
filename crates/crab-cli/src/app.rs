@@ -65,30 +65,45 @@ pub fn latest_session(dir: &Path) -> Option<PathBuf> {
     files.pop()
 }
 
-pub fn build_agent(cfg: &AppConfig, continue_: bool) -> Result<(Agent, String)> {
+pub fn build_agent(
+    cfg: &AppConfig,
+    continue_: bool,
+) -> Result<(Agent, String, crab_core::config::ResolvedProvider)> {
     let cwd = std::env::current_dir().context("cwd")?;
     let system_prompt = build_system_prompt(&cwd, cfg.system.clone());
 
-    let provider: Box<dyn Provider> = match cfg.provider.as_deref() {
-        Some("mock") => Box::new(crab_core::provider::MockProvider::new(vec![vec![
-            crab_core::stream::StreamEvent::TextDelta("mock response".into()),
-            crab_core::stream::StreamEvent::StreamEnd {
-                reason: crab_core::types::StopReason::EndTurn,
-            },
-        ]])),
-        name => {
-            let config = crab_core::config::Config::load_from(None)
-                .map_err(|e| anyhow::anyhow!("config: {e}"))?;
-            let r =
-                crab_core::config::resolve_credentials(&config, name, &|k| std::env::var(k).ok())
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            Box::new(OpenAiProvider::new(
-                r.base_url.clone(),
-                r.api_key.clone(),
-                r.model.clone(),
-            ))
-        }
-    };
+    let (provider, resolved): (Box<dyn Provider>, crab_core::config::ResolvedProvider) =
+        match cfg.provider.as_deref() {
+            Some("mock") => (
+                Box::new(crab_core::provider::MockProvider::new(vec![vec![
+                    crab_core::stream::StreamEvent::TextDelta("mock response".into()),
+                    crab_core::stream::StreamEvent::StreamEnd {
+                        reason: crab_core::types::StopReason::EndTurn,
+                    },
+                ]])),
+                crab_core::config::ResolvedProvider {
+                    base_url: String::new(),
+                    model: "mock".into(),
+                    api_key: String::new(),
+                    context_window: None,
+                    provider_name: "mock".into(),
+                },
+            ),
+            name => {
+                let config = crab_core::config::Config::load_from(None)
+                    .map_err(|e| anyhow::anyhow!("config: {e}"))?;
+                let r = crab_core::config::resolve_credentials(&config, name, &|k| {
+                    std::env::var(k).ok()
+                })
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let provider = Box::new(OpenAiProvider::new(
+                    r.base_url.clone(),
+                    r.api_key.clone(),
+                    r.model.clone(),
+                ));
+                (provider, r)
+            }
+        };
 
     // Permission routing (Q9): --yolo all-allow; --print auto-approve (no one to ask);
     // interactive asks on the terminal.
@@ -118,7 +133,7 @@ pub fn build_agent(cfg: &AppConfig, continue_: bool) -> Result<(Agent, String)> 
             system_prompt: system_prompt.clone(),
         },
     );
-    Ok((agent, system_prompt))
+    Ok((agent, system_prompt, resolved))
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ pub fn classify(s: &str) -> Input {
 }
 
 pub async fn run_interactive(cfg: &AppConfig, continue_: bool) -> Result<()> {
-    let (mut agent, _sys) = build_agent(cfg, continue_)?;
+    let (mut agent, _sys, _provider) = build_agent(cfg, continue_)?;
     let mut rl = Reedline::create();
     let prompt = DefaultPrompt::default();
     println!("crab interactive. /quit to exit, Ctrl-C aborts the current run.");
