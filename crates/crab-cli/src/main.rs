@@ -49,7 +49,9 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_print(cli: &Cli, prompt: String) -> anyhow::Result<()> {
     let cfg = app::AppConfig::from(cli);
-    let (mut agent, _sys, _provider) = app::build_agent(&cfg, cli.continue_)?;
+    // `_mcp` holds the live MCP child processes (see `build_agent`): it must outlive
+    // the run below, so it is bound here rather than dropped inside `build_agent`.
+    let (mut agent, _sys, _provider, _mcp) = app::build_agent(&cfg, cli.continue_).await?;
     let rx = agent.subscribe();
     // Render until the channel closes, not until `Finished`: the run loop and the
     // provider→agent bridge task publish to the same channel, so a text delta can

@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use crab_core::agent::{Agent, AgentConfig};
 use crab_core::gate::PermissionGate;
+use crab_core::mcp::{McpClient, McpTool};
 use crab_core::provider::Provider;
 use crab_core::provider::openai::OpenAiProvider;
 use crab_core::session::Session;
 use crab_core::state::SessionState;
+use crab_core::tool::ToolRegistry;
 use crab_core::tools::register_all;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const BASE_PROMPT: &str = r#"You are crab, a coding agent. You have these tools: read, write, edit, bash, glob, grep, web_fetch.
 
@@ -66,12 +69,28 @@ pub fn latest_session(dir: &Path) -> Option<PathBuf> {
     files.pop()
 }
 
-pub fn build_agent(
+/// Assemble a ready-to-run agent.
+///
+/// The returned [`McpClient`]s are the live MCP children backing the MCP tools
+/// registered in the agent's registry: dropping one closes the connection and
+/// kills its process, so the caller **must** keep them alive for as long as the
+/// agent may call those tools.
+pub async fn build_agent(
     cfg: &AppConfig,
     continue_: bool,
-) -> Result<(Agent, String, crab_core::config::ResolvedProvider)> {
+) -> Result<(
+    Agent,
+    String,
+    crab_core::config::ResolvedProvider,
+    Vec<Arc<McpClient>>,
+)> {
     let cwd = std::env::current_dir().context("cwd")?;
     let system_prompt = build_system_prompt(&cwd, cfg.system.clone());
+
+    // Loaded once: the provider resolves its credentials from it and the
+    // `[mcp.*]` sections below decide which servers to start.
+    let config =
+        crab_core::config::Config::load_from(None).map_err(|e| anyhow::anyhow!("config: {e}"))?;
 
     let (provider, resolved): (Box<dyn Provider>, crab_core::config::ResolvedProvider) =
         match cfg.provider.as_deref() {
@@ -91,8 +110,6 @@ pub fn build_agent(
                 },
             ),
             name => {
-                let config = crab_core::config::Config::load_from(None)
-                    .map_err(|e| anyhow::anyhow!("config: {e}"))?;
                 let r = crab_core::config::resolve_credentials(&config, name, &|k| {
                     std::env::var(k).ok()
                 })
@@ -115,7 +132,10 @@ pub fn build_agent(
     } else {
         PermissionGate::with_confirmer(crate::confirm::terminal_confirmer())
     };
-    let tools = register_all(SessionState::default(), gate);
+    let mut tools = register_all(SessionState::default(), gate.clone());
+    // MCP servers come up before the session is created: a server that fails to
+    // start is only ever a warning, never a reason not to start crab.
+    let mcp_clients = attach_mcp_servers(&config, gate, &mut tools).await;
 
     let dir = sessions_dir(&cwd);
     let session = if continue_ {
@@ -134,7 +154,55 @@ pub fn build_agent(
             system_prompt: system_prompt.clone(),
         },
     );
-    Ok((agent, system_prompt, resolved))
+    Ok((agent, system_prompt, resolved, mcp_clients))
+}
+
+/// Spawn every enabled `[mcp.*]` server and register its tools into `tools`.
+///
+/// Returns the live clients, which the caller must hold for the lifetime of the
+/// run (see [`build_agent`]). Startup is best-effort by design: a spawn or
+/// `tools/list` failure warns on stderr and skips that server, so one broken
+/// server cannot keep crab from starting.
+///
+/// Servers start in name order so the warnings a user sees are deterministic.
+async fn attach_mcp_servers(
+    config: &crab_core::config::Config,
+    gate: PermissionGate,
+    tools: &mut ToolRegistry,
+) -> Vec<Arc<McpClient>> {
+    let mut clients = Vec::new();
+    let mut names: Vec<&str> = config.mcp.keys().map(String::as_str).collect();
+    names.sort_unstable();
+
+    for name in names {
+        let srv = &config.mcp[name];
+        if !srv.is_enabled() {
+            continue;
+        }
+        let client = match McpClient::spawn(name, srv, gate.clone()).await {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("[crab] mcp server '{name}': spawn failed: {e} (skipped)");
+                continue;
+            }
+        };
+        let listed = match client.list_tools().await {
+            Ok(listed) => listed,
+            Err(e) => {
+                eprintln!("[crab] mcp server '{name}': list_tools failed: {e} (skipped)");
+                continue;
+            }
+        };
+        // One Arc per server: every wrapper shares the same child process, so a
+        // server with five tools is still one process, one session.
+        let client = Arc::new(client);
+        for meta in &listed {
+            tools.register(Box::new(McpTool::new(client.clone(), name, meta)));
+        }
+        clients.push(client);
+    }
+
+    clients
 }
 
 #[cfg(test)]
@@ -161,6 +229,66 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sp = build_system_prompt(dir.path(), Some("extra rule".into()));
         assert!(sp.contains("extra rule"));
+    }
+}
+
+#[cfg(test)]
+mod mcp_wiring_tests {
+    use super::*;
+    use crab_core::config::Config;
+
+    fn built_in_registry() -> ToolRegistry {
+        register_all(SessionState::default(), PermissionGate::auto_approve())
+    }
+
+    /// The headline invariant: a server that cannot be started is warned about
+    /// and skipped, never a reason to fail startup. The built-in tools a
+    /// `--print` run depends on must all still be registered.
+    #[tokio::test]
+    async fn unspawnable_server_is_skipped_not_fatal() {
+        let config = Config::from_toml(
+            r#"
+[mcp.broken]
+command = "/nonexistent/crab-mcp-server-that-is-not-here"
+"#,
+        )
+        .unwrap();
+        let mut tools = built_in_registry();
+        let clients = attach_mcp_servers(&config, PermissionGate::auto_approve(), &mut tools).await;
+
+        assert!(clients.is_empty(), "a failed server must not be kept alive");
+        for name in ["read", "write", "edit", "bash", "glob", "grep", "web_fetch"] {
+            assert!(tools.contains(name), "missing built-in tool {name}");
+        }
+    }
+
+    /// `enabled = false` must never even try to spawn the process.
+    #[tokio::test]
+    async fn disabled_server_is_not_spawned() {
+        let config = Config::from_toml(
+            r#"
+[mcp.off]
+command = "/nonexistent/never-spawned"
+enabled = false
+"#,
+        )
+        .unwrap();
+        let mut tools = built_in_registry();
+        let clients = attach_mcp_servers(&config, PermissionGate::auto_approve(), &mut tools).await;
+        assert!(clients.is_empty());
+    }
+
+    /// No `[mcp.*]` sections at all: nothing to attach, no panic.
+    #[tokio::test]
+    async fn no_servers_configured_attaches_nothing() {
+        let mut tools = built_in_registry();
+        let clients = attach_mcp_servers(
+            &Config::default(),
+            PermissionGate::auto_approve(),
+            &mut tools,
+        )
+        .await;
+        assert!(clients.is_empty());
     }
 }
 
