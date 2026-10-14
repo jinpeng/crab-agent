@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod config;
 pub mod gate;
 pub mod provider;
 pub mod session;
