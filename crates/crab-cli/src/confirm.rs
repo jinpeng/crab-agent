@@ -76,6 +76,11 @@ pub fn terminal_confirmer() -> Confirmer {
                 return Decision::Deny;
             }
             if let Some(d) = parse_answer(&line) {
+                // read_line consumed the Enter's newline without echoing it, so the
+                // cursor is still on the prompt line. Terminate that line so the
+                // status line / next output starts fresh instead of appending after
+                // the user's answer.
+                println!();
                 return d;
             }
             println!("please answer y, n, or a");
