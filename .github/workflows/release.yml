@@ -1,0 +1,137 @@
+name: release
+
+# Pushing a version tag (e.g. v0.1.0) builds precompiled binaries for every
+# platform in the matrix below and attaches them to a GitHub Release for that
+# tag. The release is created on first publish and reused (assets appended) on
+# re-runs, so re-tagging a build does not fail with "release already exists".
+on:
+  push:
+    tags:
+      - "v*"
+
+# The GITHUB_TOKEN needs write access to create the release and upload assets.
+permissions:
+  contents: write
+
+# If a tag is (re)built, cancel the superseded run instead of racing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One job per platform. Each produces a self-contained tarball named
+  # crab-<version>-<target>.tar.gz, so the asset name encodes both the version
+  # and the exact Rust target triple it was built for.
+  #
+  # Runner notes
+  #   macos-latest    -> arm64 (Apple Silicon); target aarch64-apple-darwin
+  #   ubuntu-latest   -> x86_64; target x86_64-unknown-linux-gnu
+  #   ubuntu-24.04-arm-> arm64 Linux, GitHub-hosted (public repos). If this
+  #                      runner is not available for your repo (private repos /
+  #                      org policy), delete that one `include:` entry below --
+  #                      nothing else needs to change and the other two targets
+  #                      still release normally.
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so release notes can be generated from commits.
+          fetch-depth: 0
+
+      # Pinned to the toolchain the repo builds with (matches
+      # rust-toolchain.toml; ci.yml uses the same channel).
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Derive version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Warn if tag and Cargo.toml version disagree
+        run: |
+          set -euo pipefail
+          CARGO_VERSION="$(grep -m1 '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$CARGO_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::warning::tag is v${{ steps.version.outputs.version }} but [workspace.package] version is $CARGO_VERSION"
+          fi
+
+      - name: cargo build --release
+        run: cargo build --release -p crab-cli --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          BIN="target/${TARGET}/release/crab"
+          ARCHIVE="crab-${VERSION}-${TARGET}.tar.gz"
+
+          test -f "$BIN" || { echo "error: $BIN not found"; exit 1; }
+
+          # Strip debug/symbol data before archiving. (The release profile also
+          # sets strip = true; this is belt-and-braces and keeps the archive
+          # small even if that setting changes.) `strip` works on macOS and Linux.
+          strip "$BIN"
+
+          # Archive with `crab` at the root so it unpacks to a runnable binary.
+          tar -czf "$ARCHIVE" -C "$(dirname "$BIN")" crab
+          ls -l "$ARCHIVE"
+
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload archive as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crab-${{ steps.version.outputs.version }}-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  # Single publisher job: collects every platform's archive and creates/updates
+  # the release once. Doing the upload here (rather than from each matrix job)
+  # avoids several jobs racing to create the same release.
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show collected assets
+        run: ls -l dist
+
+      # softprops/action-gh-release creates the release if it does not exist,
+      # uploads the matching files, and fills in notes generated from the
+      # commits since the previous tag. Re-running is safe: assets are replaced.
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+          # Tags like v0.2.0-rc1 are published as pre-releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
