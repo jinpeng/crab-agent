@@ -22,7 +22,7 @@ Be precise and minimal. Verify changes compile or pass tests with `bash` when re
 pub struct AppConfig {
     pub yolo: bool,
     pub system: Option<String>,
-    pub provider: String,
+    pub provider: Option<String>,
     /// true for --print (non-interactive: auto-approve), false for interactive (confirm).
     pub non_interactive: bool,
 }
@@ -69,14 +69,26 @@ pub fn build_agent(cfg: &AppConfig, continue_: bool) -> Result<(Agent, String)> 
     let cwd = std::env::current_dir().context("cwd")?;
     let system_prompt = build_system_prompt(&cwd, cfg.system.clone());
 
-    let provider: Box<dyn Provider> = match cfg.provider.as_str() {
-        "mock" => Box::new(crab_core::provider::MockProvider::new(vec![vec![
+    let provider: Box<dyn Provider> = match cfg.provider.as_deref() {
+        Some("mock") => Box::new(crab_core::provider::MockProvider::new(vec![vec![
             crab_core::stream::StreamEvent::TextDelta("mock response".into()),
             crab_core::stream::StreamEvent::StreamEnd {
                 reason: crab_core::types::StopReason::EndTurn,
             },
         ]])),
-        _ => Box::new(OpenAiProvider::resolve().map_err(|e| anyhow::anyhow!("{e}"))?),
+        name => {
+            let config = crab_core::config::Config::load_from(None)
+                .map_err(|e| anyhow::anyhow!("config: {e}"))?;
+            let r = crab_core::config::resolve_credentials(&config, name, &|k| {
+                std::env::var(k).ok()
+            })
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Box::new(OpenAiProvider::new(
+                r.base_url.clone(),
+                r.api_key.clone(),
+                r.model.clone(),
+            ))
+        }
     };
 
     // Permission routing (Q9): --yolo all-allow; --print auto-approve (no one to ask);

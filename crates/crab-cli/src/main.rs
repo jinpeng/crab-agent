@@ -17,9 +17,10 @@ pub struct Cli {
     /// Allow all tool calls without confirmation
     #[arg(long)]
     yolo: bool,
-    /// Provider: "openai" (real) or "mock" (scripted, for debugging)
-    #[arg(long, default_value = "openai")]
-    provider: String,
+    /// Provider profile name from ~/.crab/config.toml (or "mock" for debugging).
+    /// Omit to use the config's default_provider.
+    #[arg(long)]
+    provider: Option<String>,
     /// Extra system prompt appended after base + AGENTS.md
     #[arg(long)]
     system: Option<String>,
