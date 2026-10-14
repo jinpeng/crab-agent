@@ -80,20 +80,23 @@ fn render_event(out: &mut impl Write, theme: &Theme, ev: &AgentEvent) {
     let _ = out.flush();
 }
 
-/// Render events with a live status line drawn as the last content line while the
-/// agent runs, and cleared before control returns to the reedline prompt.
+/// Render events with a live status line while the agent runs, cleared before
+/// control returns to the reedline prompt.
 ///
-/// We deliberately avoid a persistent scroll-region status line: reedline owns the
-/// bottom row while waiting for input, so a fixed line would fight it. Instead the
-/// status line is drawn in place below the content during the run and erased when
-/// the run ends.
+/// Invariant: the status line is only ever drawn when the cursor is at the start of
+/// a fresh line (right after a newline). It occupies that whole line, so the cursor
+/// sits at the status line's end. Any new content first erases it with `\r\x1b[2K`
+/// (carriage-return + clear line) — valid because the status line is exactly the
+/// current line. We never move *up* a line, so multi-line tool blocks and unterminated
+/// text deltas can't corrupt it.
 pub async fn render_events_with_status(
     mut rx: tokio::sync::broadcast::Receiver<AgentEvent>,
     mut status: crate::status::StatusLine,
 ) {
     let theme = Theme::dark();
     let mut out = std::io::stdout();
-    let mut drawn = false; // is the status line currently the last printed line?
+    // status_drawn: the status line currently occupies the current line.
+    let mut status_drawn = false;
 
     loop {
         let ev = match rx.recv().await {
@@ -102,23 +105,33 @@ pub async fn render_events_with_status(
             Err(RecvError::Closed) => break,
         };
 
-        // Erase the in-place status line (if any) so content prints over it.
-        if std::mem::take(&mut drawn) {
-            let _ = write!(out, "\x1b[1A\r\x1b[2K");
+        // Erase the status line if it's the current line before printing content.
+        if std::mem::take(&mut status_drawn) {
+            let _ = write!(out, "\r\x1b[2K");
         }
 
         let is_end = matches!(ev, AgentEvent::Finished { .. });
         update_status(&mut status, &ev);
+
+        // If a tool block follows an unterminated text delta, move to a fresh line first.
+        let needs_lf_before = matches!(
+            ev,
+            AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolCallFinished { .. }
+        );
+        if needs_lf_before {
+            let _ = writeln!(out);
+        }
         render_event(&mut out, &theme, &ev);
 
         if is_end {
-            let _ = writeln!(out);
-            break; // leave a clean line for the reedline prompt
+            let _ = writeln!(out); // fresh line for the reedline prompt
+            break;
         }
-        // Redraw the status line below the fresh content.
+
+        // Draw the status line on its own line below the content.
         let _ = writeln!(out);
         draw_status(&mut out, &theme, &status);
-        drawn = true;
+        status_drawn = true;
     }
     let _ = out.flush();
 }
