@@ -4,6 +4,9 @@ mod app;
 mod confirm;
 mod interactive;
 mod render;
+// TODO: used by render.rs once it consumes the theme; until then, silence dead_code.
+#[allow(dead_code)]
+mod theme;
 
 #[derive(Parser)]
 #[command(name = "crab", version, about = "Rust coding agent")]
