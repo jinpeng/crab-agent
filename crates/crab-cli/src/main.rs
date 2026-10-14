@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod app;
+mod confirm;
 mod interactive;
 mod render;
 

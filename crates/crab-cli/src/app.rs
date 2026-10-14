@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub yolo: bool,
     pub system: Option<String>,
     pub provider: String,
+    /// true for --print (non-interactive: auto-approve), false for interactive (confirm).
+    pub non_interactive: bool,
 }
 
 impl From<&crate::Cli> for AppConfig {
@@ -22,6 +24,7 @@ impl From<&crate::Cli> for AppConfig {
             yolo: c.yolo,
             system: c.system.clone(),
             provider: c.provider.clone(),
+            non_interactive: c.print.is_some(),
         }
     }
 }
@@ -67,10 +70,14 @@ pub fn build_agent(cfg: &AppConfig, continue_: bool) -> Result<(Agent, String)> 
         _ => Box::new(OpenAiProvider::resolve().map_err(|e| anyhow::anyhow!("{e}"))?),
     };
 
+    // Permission routing (Q9): --yolo all-allow; --print auto-approve (no one to ask);
+    // interactive asks on the terminal.
     let gate = if cfg.yolo {
         PermissionGate::yolo()
-    } else {
+    } else if cfg.non_interactive {
         PermissionGate::auto_approve()
+    } else {
+        PermissionGate::with_confirmer(crate::confirm::terminal_confirmer())
     };
     let tools = register_all(SessionState::default(), gate);
 
