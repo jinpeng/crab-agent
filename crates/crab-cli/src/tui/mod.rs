@@ -87,6 +87,15 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // A 0x0 (or sub-minimum) terminal renders an empty screen and looks frozen.
+    // Bail with a clear message instead of silently drawing nothing.
+    let (w, h) = terminal::size()?;
+    if w < 10 || h < 5 {
+        execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+        terminal::disable_raw_mode()?;
+        anyhow::bail!("terminal too small ({w}x{h}); need at least 10x5");
+    }
+
     // Guard to restore terminal on drop (panic-safe)
     let _guard = scopeguard::guard((), |_| {
         let _ = terminal::disable_raw_mode();
