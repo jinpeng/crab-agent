@@ -25,10 +25,7 @@ pub enum Bubble {
     /// User message.
     User(String),
     /// Assistant text (streaming or complete).
-    Assistant {
-        text: String,
-        complete: bool,
-    },
+    Assistant { text: String, complete: bool },
     /// Tool call with optional result.
     Tool {
         id: ToolCallId,
@@ -54,7 +51,9 @@ pub struct Theme;
 
 impl Theme {
     pub fn user() -> Style {
-        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn assistant() -> Style {
@@ -165,7 +164,11 @@ pub struct TuiState {
 }
 
 impl TuiState {
-    pub fn new(provider_model: String, cwd: std::path::PathBuf, context_window: Option<u64>) -> Self {
+    pub fn new(
+        provider_model: String,
+        cwd: std::path::PathBuf,
+        context_window: Option<u64>,
+    ) -> Self {
         let mut status = StatusLine::new(provider_model, cwd);
         status.set_context(None, context_window);
         Self {
@@ -231,13 +234,12 @@ impl TuiState {
             TextDelta(s) => {
                 self.set_run_state(RunState::Streaming);
                 // Append to current assistant bubble or create new one
-                if let Some(last) = self.bubbles.last_mut() {
-                    if let Bubble::Assistant { text, complete } = last {
-                        if !*complete {
-                            text.push_str(&s);
-                            return;
-                        }
-                    }
+                if let Some(last) = self.bubbles.last_mut()
+                    && let Bubble::Assistant { text, complete } = last
+                    && !*complete
+                {
+                    text.push_str(&s);
+                    return;
                 }
                 // No open assistant bubble, create new
                 self.bubbles.push(Bubble::Assistant {
@@ -254,21 +256,23 @@ impl TuiState {
             } => {
                 let used = (prompt_tokens + completion_tokens) as u64;
                 self.status.set_tokens_used(used);
-                self.status.set_context(Some(used), self.status.context_window());
+                self.status
+                    .set_context(Some(used), self.status.context_window());
             }
             AssistantMessage(msg) => {
                 // Cache tool args and mark assistant bubble as complete
                 for block in &msg.content {
                     if let crab_core::types::ContentBlock::ToolUse { id, name, input } = block {
                         let args_str = compact_json(input);
-                        self.tool_args_cache.insert(id.clone(), format!("{name} {args_str}"));
+                        self.tool_args_cache
+                            .insert(id.clone(), format!("{name} {args_str}"));
                     }
                 }
                 // Mark current assistant bubble as complete
-                if let Some(last) = self.bubbles.last_mut() {
-                    if let Bubble::Assistant { complete, .. } = last {
-                        *complete = true;
-                    }
+                if let Some(last) = self.bubbles.last_mut()
+                    && let Bubble::Assistant { complete, .. } = last
+                {
+                    *complete = true;
                 }
             }
             ToolCallStarted { id, name } => {
@@ -292,16 +296,18 @@ impl TuiState {
                 self.set_run_state(RunState::Streaming);
                 // Find the tool bubble and set result
                 for bubble in self.bubbles.iter_mut().rev() {
-                    if let Bubble::Tool { id: bid, result: r, .. } = bubble {
-                        if *bid == id {
-                            let (text, truncated) = truncate_result(&result);
-                            *r = Some(ToolResult {
-                                text,
-                                is_error,
-                                truncated,
-                            });
-                            break;
-                        }
+                    if let Bubble::Tool {
+                        id: bid, result: r, ..
+                    } = bubble
+                        && *bid == id
+                    {
+                        let (text, truncated) = truncate_result(&result);
+                        *r = Some(ToolResult {
+                            text,
+                            is_error,
+                            truncated,
+                        });
+                        break;
                     }
                 }
             }
@@ -348,11 +354,7 @@ fn compact_json(v: &serde_json::Value) -> String {
                 .map(|(k, v)| format!("{}={}", k, compact_json_value(v)))
                 .collect();
             let s = pairs.join(" ");
-            if m.len() > 3 {
-                format!("{} ...", s)
-            } else {
-                s
-            }
+            if m.len() > 3 { format!("{} ...", s) } else { s }
         }
         _ => v.to_string(),
     }
@@ -444,12 +446,10 @@ impl Bubble {
                 }
                 Text::from(lines)
             }
-            Bubble::System(text) => {
-                Text::from(Line::from(vec![Span::styled(
-                    text.clone(),
-                    Style::default().fg(Color::Yellow),
-                )]))
-            }
+            Bubble::System(text) => Text::from(Line::from(vec![Span::styled(
+                text.clone(),
+                Style::default().fg(Color::Yellow),
+            )])),
         }
     }
 }

@@ -1,13 +1,13 @@
 //! Rendering logic for the TUI.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::Line,
     widgets::{
         Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
-    Frame,
 };
 
 use super::state::{Theme, TuiState};
@@ -17,9 +17,9 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),      // Transcript
-            Constraint::Length(1),   // Status line
-            Constraint::Length(3),   // Input box
+            Constraint::Min(3),    // Transcript
+            Constraint::Length(1), // Status line
+            Constraint::Length(3), // Input box
         ])
         .split(f.area());
 
@@ -114,14 +114,16 @@ fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
     };
 
     let input_lines = state.input.to_lines(area.width);
-    let paragraph = Paragraph::new(input_lines)
-        .style(style)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(if is_running { " running... (Ctrl-C to abort) " } else { "" }),
-        );
+    let paragraph = Paragraph::new(input_lines).style(style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(if is_running {
+                " running... (Ctrl-C to abort) "
+            } else {
+                ""
+            }),
+    );
 
     f.render_widget(paragraph, area);
 
@@ -139,7 +141,10 @@ fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
             6 + input_text[..cursor_byte].chars().count()
         } else {
             // Subsequent lines: "      " prefix (6 chars) + column offset on that line
-            let line_start = input_text[..cursor_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_start = input_text[..cursor_byte]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             6 + input_text[line_start..cursor_byte].chars().count()
         };
 
@@ -174,14 +179,12 @@ fn draw_confirm_modal(f: &mut Frame, state: &TuiState) {
         pending.prompt.tool, pending.prompt.summary
     );
 
-    let paragraph = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
-                .title(" Permission "),
-        );
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Permission "),
+    );
 
     f.render_widget(paragraph, area);
 }
@@ -211,7 +214,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::tui::state::Bubble;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn state_with(n: usize) -> TuiState {
         let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);

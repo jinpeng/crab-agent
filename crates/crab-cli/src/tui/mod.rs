@@ -17,15 +17,17 @@ use anyhow::Result;
 use crab_core::agent::AgentEvent;
 use crab_core::gate::{Decision, Prompt};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::Stdout;
 use std::time::Duration;
 
-use crate::app::{build_agent, AppConfig};
+use crate::app::{AppConfig, build_agent};
 use confirm::ConfirmBridge;
 pub use state::TuiState;
 
@@ -82,11 +84,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     // Guard to restore terminal on drop (panic-safe)
     let _guard = scopeguard::guard((), |_| {
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
     });
 
     // Run the TUI loop in spawn_blocking (synchronous terminal I/O)
@@ -336,7 +334,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
             if trimmed == "/quit" || trimmed == "/exit" {
                 return Some(Action::Quit);
             }
-            return Some(Action::Submit(text));
+            Some(Action::Submit(text))
         }
         Backspace => {
             state.input.backspace();

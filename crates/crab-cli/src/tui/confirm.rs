@@ -4,7 +4,7 @@ use crab_core::gate::{Confirmer, Decision, Prompt};
 use std::sync::{Arc, Mutex};
 
 /// Shared state for confirm bridge.
-/// 
+///
 /// The Confirmer closure captures an Arc<ConfirmBridgeInner> and uses it
 /// to communicate with the TUI event loop via sync channels.
 #[derive(Debug)]
