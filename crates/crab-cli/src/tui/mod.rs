@@ -43,8 +43,13 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     bridge.set_sender(ui_tx.clone());
 
     // Build agent with our confirmer
-    let (mut agent, _sys, provider, _mcp) =
+    let (mut agent, _sys, provider, _mcp, gate, config) =
         build_agent(cfg, continue_, Some(bridge.confirmer())).await?;
+
+    // Provider profile names for the /model picker (sorted, mock last).
+    let mut model_names: Vec<String> = config.providers.keys().cloned().collect();
+    model_names.sort();
+    model_names.push("mock".to_string());
 
     // Subscribe to agent events
     let mut agent_rx = agent.subscribe();
@@ -54,11 +59,12 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
 
     // Initialize state
     let cwd = std::env::current_dir().unwrap_or_default();
-    let state = TuiState::new(
+    let mut state = TuiState::new(
         format!("{}/{}", provider.provider_name, provider.model),
         cwd,
         provider.context_window,
     );
+    state.yolo = gate.is_permissive();
 
     // Errors from agent runs go through the UI channel: printing to stderr
     // would corrupt the alt-screen.
@@ -92,7 +98,14 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     let tui_cmd_tx = cmd_tx.clone();
 
     let mut tui_handle = tokio::task::spawn_blocking(move || {
-        run_tui_loop(&mut terminal, state, ui_rx, tui_cmd_tx, tick_rate)
+        run_tui_loop(
+            &mut terminal,
+            state,
+            ui_rx,
+            tui_cmd_tx,
+            tick_rate,
+            model_names,
+        )
     });
 
     // Async command handler - runs agent runs and processes commands
@@ -129,6 +142,23 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
                     UiCommand::Abort => {
                         // No-op if nothing running
                     }
+                    UiCommand::ToggleYolo => {
+                        let on = !gate.is_permissive();
+                        gate.set_allow_all(on);
+                        let _ = ui_tx.send(UiEvent::YoloChanged(on));
+                    }
+                    UiCommand::SetModel(name) => {
+                        match crate::app::resolve_provider(&config, Some(&name)) {
+                            Ok((new_provider, resolved)) => {
+                                agent.set_provider(new_provider);
+                                let label = format!("{}/{}", resolved.provider_name, resolved.model);
+                                let _ = ui_tx.send(UiEvent::ModelChanged(label));
+                            }
+                            Err(e) => {
+                                let _ = err_tx.send(UiEvent::Error(format!("/model {name}: {e}")));
+                            }
+                        }
+                    }
                     UiCommand::Quit => break,
                 }
             }
@@ -152,6 +182,10 @@ enum UiCommand {
     Submit(String),
     Abort,
     Quit,
+    /// Toggle session-wide allow-all (yolo). TUI flips its own indicator.
+    ToggleYolo,
+    /// Switch to a named provider profile. TUI updates its label on success.
+    SetModel(String),
 }
 
 /// Events to TUI from agent/async context.
@@ -162,6 +196,8 @@ enum UiEvent {
         prompt: Prompt,
         reply: std::sync::mpsc::Sender<Decision>,
     },
+    YoloChanged(bool),
+    ModelChanged(String),
 }
 
 /// Synchronous TUI event loop.
@@ -171,6 +207,7 @@ fn run_tui_loop(
     ui_rx: std::sync::mpsc::Receiver<UiEvent>,
     cmd_tx: tokio::sync::mpsc::Sender<UiCommand>,
     tick_rate: Duration,
+    model_names: Vec<String>,
 ) -> Result<()> {
     loop {
         // Draw current state
@@ -180,7 +217,7 @@ fn run_tui_loop(
         // (mouse wheel, paste) costs one redraw instead of one per event.
         let mut ready = event::poll(tick_rate)?;
         while ready {
-            if handle_event(event::read()?, &mut state, &cmd_tx) {
+            if handle_event(event::read()?, &mut state, &cmd_tx, &model_names) {
                 return Ok(());
             }
             ready = event::poll(Duration::ZERO)?;
@@ -192,6 +229,19 @@ fn run_tui_loop(
                 UiEvent::Agent(ae) => state.apply_agent_event(ae),
                 UiEvent::Error(msg) => state.show_error(msg),
                 UiEvent::Confirm { prompt, reply } => state.begin_confirm(prompt, reply),
+                UiEvent::YoloChanged(on) => {
+                    state.yolo = on;
+                    state.notice(if on {
+                        "yolo ON — all tool calls auto-approved"
+                    } else {
+                        "yolo OFF — tool calls need confirmation"
+                    });
+                }
+                UiEvent::ModelChanged(label) => {
+                    state.set_provider_label(label.clone());
+                    state.status.set_provider_model(label.clone());
+                    state.notice(format!("switched to {label}"));
+                }
             }
         }
 
@@ -209,9 +259,15 @@ fn handle_event(
     ev: Event,
     state: &mut TuiState,
     cmd_tx: &tokio::sync::mpsc::Sender<UiCommand>,
+    model_names: &[String],
 ) -> bool {
     match ev {
         Event::Key(key) => {
+            // Model picker overlay takes precedence.
+            if state.picker.is_some() {
+                handle_picker_key(key.code, state, cmd_tx);
+                return false;
+            }
             if state.confirm.is_some() {
                 // Route to confirm modal
                 if let Some(decision) = handle_confirm_key(key.code, key.modifiers) {
@@ -230,6 +286,9 @@ fn handle_event(
                 Some(Action::Quit) => {
                     let _ = cmd_tx.blocking_send(UiCommand::Quit);
                     return true;
+                }
+                Some(Action::Slash(sc)) => {
+                    dispatch_slash(sc, state, cmd_tx, model_names);
                 }
                 None => {}
             }
@@ -251,6 +310,8 @@ enum Action {
     Submit(String),
     Abort,
     Quit,
+    /// A slash command to dispatch to the async handler.
+    Slash(state::SlashCommand),
 }
 
 /// Handle a key event in normal input mode.
@@ -326,13 +387,12 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
             }
             // Enter: submit
             let text = state.input.take();
-            if text.trim().is_empty() {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
                 return None;
             }
-            // Check for slash commands
-            let trimmed = text.trim();
-            if trimmed == "/quit" || trimmed == "/exit" {
-                return Some(Action::Quit);
+            if let Some(sc) = state::parse_slash(trimmed) {
+                return Some(Action::Slash(sc));
             }
             Some(Action::Submit(text))
         }
@@ -374,6 +434,68 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
             None
         }
         _ => None,
+    }
+}
+
+/// Dispatch a parsed slash command. `/quit` exits the TUI; the rest either
+/// mutate state directly (cheap) or forward to the async handler (model switch).
+fn dispatch_slash(
+    sc: state::SlashCommand,
+    state: &mut TuiState,
+    cmd_tx: &tokio::sync::mpsc::Sender<UiCommand>,
+    model_names: &[String],
+) {
+    match sc {
+        state::SlashCommand::Quit => {
+            let _ = cmd_tx.blocking_send(UiCommand::Quit);
+        }
+        state::SlashCommand::Yolo => {
+            let _ = cmd_tx.blocking_send(UiCommand::ToggleYolo);
+        }
+        state::SlashCommand::Model(Some(name)) => {
+            let _ = cmd_tx.blocking_send(UiCommand::SetModel(name));
+        }
+        state::SlashCommand::Model(None) => {
+            state.notice("usage: /model <name>  — or /models to pick from a list");
+        }
+        state::SlashCommand::PickModel => {
+            let current = model_names
+                .iter()
+                .position(|n| state.provider_label.starts_with(n.as_str()))
+                .unwrap_or(0);
+            state.picker = Some(state::ModelPicker::new(model_names.to_vec(), current));
+        }
+        state::SlashCommand::Unknown(name) => {
+            state.notice(format!(
+                "unknown command /{name}  (try /quit, /yolo, /model <name>)"
+            ));
+        }
+    }
+}
+
+/// Handle a key while the model picker overlay is open.
+fn handle_picker_key(
+    code: KeyCode,
+    state: &mut TuiState,
+    cmd_tx: &tokio::sync::mpsc::Sender<UiCommand>,
+) {
+    use KeyCode::*;
+    let Some(picker) = state.picker.as_mut() else {
+        return;
+    };
+    match code {
+        Up | Char('k') => picker.move_up(),
+        Down | Char('j') => picker.move_down(),
+        Enter => {
+            if let Some(name) = picker.selected_name().map(str::to_string) {
+                state.picker = None;
+                let _ = cmd_tx.blocking_send(UiCommand::SetModel(name));
+            }
+        }
+        Esc | Char('q') => {
+            state.picker = None;
+        }
+        _ => {}
     }
 }
 

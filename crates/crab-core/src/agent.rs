@@ -104,6 +104,13 @@ impl Agent {
         &self.provider_calls
     }
 
+    /// Swap the model mid-session. History, session log, tools, and config are
+    /// untouched — only the next `complete` uses the new provider. Called between
+    /// runs (e.g. the TUI's `/model`); must NOT be called while `run` holds `&mut self`.
+    pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
+        self.provider = provider;
+    }
+
     pub fn history(&self) -> &[Message] {
         &self.history
     }
