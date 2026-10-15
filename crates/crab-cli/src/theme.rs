@@ -16,11 +16,6 @@ impl Theme {
         Self
     }
 
-    /// Text the user typed: bold.
-    pub fn user_input(&self, s: &str) -> String {
-        s.bold().to_string()
-    }
-
     /// A tool name: cyan.
     pub fn tool_name(&self, s: &str) -> String {
         s.cyan().to_string()
@@ -34,11 +29,6 @@ impl Theme {
     /// A failed outcome: red.
     pub fn error(&self, s: &str) -> String {
         s.red().to_string()
-    }
-
-    /// A non-fatal caution: yellow.
-    pub fn warning(&self, s: &str) -> String {
-        s.yellow().to_string()
     }
 
     /// Secondary, de-emphasized text: dark grey.
@@ -55,11 +45,9 @@ mod tests {
     fn styles_keep_text_and_emit_ansi() {
         let t = Theme::dark();
         let cases = [
-            ("you", t.user_input("you")),
             ("read", t.tool_name("read")),
             ("done", t.success("done")),
             ("boom", t.error("boom")),
-            ("careful", t.warning("careful")),
             ("muted", t.dim("muted")),
         ];
         for (text, styled) in cases {

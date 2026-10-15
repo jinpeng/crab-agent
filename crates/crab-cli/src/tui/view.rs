@@ -1,0 +1,299 @@
+//! Rendering logic for the TUI.
+
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    text::Line,
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
+    Frame,
+};
+
+use super::state::{Theme, TuiState};
+
+/// Draw the full TUI.
+pub fn draw(f: &mut Frame, state: &mut TuiState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),      // Transcript
+            Constraint::Length(1),   // Status line
+            Constraint::Length(3),   // Input box
+        ])
+        .split(f.area());
+
+    draw_transcript(f, state, chunks[0]);
+    draw_status(f, state, chunks[1]);
+    draw_input(f, state, chunks[2]);
+
+    // Draw confirm modal on top if active
+    if state.confirm.is_some() {
+        draw_confirm_modal(f, state);
+    }
+}
+
+/// Draw the transcript area.
+///
+/// Long lines wrap, and scrolling is measured in *rendered* lines, so every line of
+/// every message is reachable. The scroll state is clamped and re-anchored here
+/// because only the draw knows the wrapped line count.
+fn draw_transcript(f: &mut Frame, state: &mut TuiState, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    for bubble in &state.bubbles {
+        lines.extend(bubble.to_text(area.width as usize).lines);
+    }
+    // Blank line at the end for spacing.
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+
+    let height = area.height as usize;
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+
+    // Reserve the right-hand column for the scrollbar once the text overflows.
+    let mut text_area = area;
+    let mut total = paragraph.line_count(area.width);
+    if total > height && area.width > 1 {
+        text_area.width -= 1;
+        total = paragraph.line_count(text_area.width);
+    }
+
+    let max_offset = total.saturating_sub(height);
+    let scroll = &mut state.scroll;
+    // While scrolled up, keep the same text on screen as output keeps arriving.
+    if !scroll.follow && scroll.last_width == text_area.width && total > scroll.last_total {
+        scroll.offset = scroll.offset.saturating_add(total - scroll.last_total);
+    }
+    scroll.offset = scroll.offset.min(max_offset);
+    scroll.follow = scroll.offset == 0;
+    scroll.last_total = total;
+    scroll.last_width = text_area.width;
+    scroll.viewport = height;
+
+    // `Paragraph::scroll` takes a u16 row; clamp rather than wrap around.
+    let top = (max_offset - scroll.offset).min(u16::MAX as usize);
+    f.render_widget(paragraph.scroll((top as u16, 0)), text_area);
+
+    if max_offset > 0 {
+        let mut bar = ScrollbarState::new(max_offset).position(top);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .style(Theme::dim());
+        f.render_stateful_widget(scrollbar, area, &mut bar);
+    }
+}
+
+/// Draw the status line.
+fn draw_status(f: &mut Frame, state: &TuiState, area: Rect) {
+    let text = state.status.format(area.width as usize);
+    let line = Line::styled(text, Theme::status());
+    let paragraph = Paragraph::new(line);
+    f.render_widget(paragraph, area);
+}
+
+/// Draw the input box.
+fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
+    let is_running = state.is_running();
+
+    let style = if is_running {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+
+    let border_style = if is_running {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Blue)
+    };
+
+    let input_lines = state.input.to_lines(area.width);
+    let paragraph = Paragraph::new(input_lines)
+        .style(style)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(if is_running { " running... (Ctrl-C to abort) " } else { "" }),
+        );
+
+    f.render_widget(paragraph, area);
+
+    // Position cursor (if not running)
+    if !is_running {
+        // Calculate cursor position in the input area
+        let input_text = state.input.text();
+        let cursor_byte = state.input.cursor();
+
+        // Count lines before cursor
+        let lines_before_cursor = input_text[..cursor_byte].lines().count();
+        let cursor_line = lines_before_cursor;
+        let cursor_col = if lines_before_cursor == 0 {
+            // First line: "crab> " prefix (6 chars) + column offset
+            6 + input_text[..cursor_byte].chars().count()
+        } else {
+            // Subsequent lines: "      " prefix (6 chars) + column offset on that line
+            let line_start = input_text[..cursor_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            6 + input_text[line_start..cursor_byte].chars().count()
+        };
+
+        // The input box has a border, so add 1 to x and y
+        let cursor_x = area.x + 1 + cursor_col as u16;
+        let cursor_y = area.y + 1 + cursor_line as u16;
+
+        // Clamp to area
+        let cursor_x = cursor_x.min(area.x + area.width.saturating_sub(2));
+        let cursor_y = cursor_y.min(area.y + area.height.saturating_sub(2));
+
+        f.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+/// Draw the confirmation modal overlay.
+fn draw_confirm_modal(f: &mut Frame, state: &TuiState) {
+    let pending = match &state.confirm {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Center the modal
+    let area = centered_rect(60, 20, f.area());
+
+    // Clear the area first
+    f.render_widget(Clear, area);
+
+    // Build modal content
+    let text = format!(
+        "⚠ {} — {}\n\n[y]es  [n]o  [a]ll",
+        pending.prompt.tool, pending.prompt.summary
+    );
+
+    let paragraph = Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Permission "),
+        );
+
+    f.render_widget(paragraph, area);
+}
+
+/// Helper to create a centered rect.
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::Bubble;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn state_with(n: usize) -> TuiState {
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);
+        push_entries(&mut s, 0..n);
+        s
+    }
+
+    fn push_entries(s: &mut TuiState, range: std::ops::Range<usize>) {
+        for i in range {
+            s.bubbles.push(Bubble::System(format!("entry-{i:03}")));
+        }
+    }
+
+    /// Draw and return the transcript rows, without the scrollbar column.
+    fn render(state: &mut TuiState, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, state)).unwrap();
+        let buf = term.backend().buffer();
+        let rows = h - 4; // status line (1) + input box (3)
+        (0..rows)
+            .map(|y| (0..w - 1).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn follows_the_latest_output_by_default() {
+        let mut s = state_with(30);
+        let rows = render(&mut s, 40, 12);
+        assert!(rows.iter().any(|r| r.contains("entry-029")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("entry-000")), "{rows:?}");
+    }
+
+    #[test]
+    fn scrolling_up_reveals_older_messages() {
+        let mut s = state_with(30);
+        render(&mut s, 40, 12); // first draw learns the viewport size
+        s.scroll_to_top();
+        let rows = render(&mut s, 40, 12);
+        assert!(rows[0].contains("entry-000"), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("entry-029")), "{rows:?}");
+
+        s.scroll_to_bottom();
+        let rows = render(&mut s, 40, 12);
+        assert!(rows.iter().any(|r| r.contains("entry-029")), "{rows:?}");
+    }
+
+    #[test]
+    fn view_stays_put_when_output_arrives_while_scrolled_up() {
+        let mut s = state_with(30);
+        render(&mut s, 40, 12);
+        s.scroll_up(5);
+        let before = render(&mut s, 40, 12);
+        push_entries(&mut s, 30..33);
+        let after = render(&mut s, 40, 12);
+        assert_eq!(before, after);
+        assert!(!s.scroll.follow);
+    }
+
+    #[test]
+    fn wrapped_lines_count_towards_the_scroll_range() {
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);
+        s.bubbles.push(Bubble::Assistant {
+            text: "word ".repeat(200),
+            complete: true,
+        });
+        render(&mut s, 20, 12);
+        assert!(s.scroll.last_total > 40, "total {}", s.scroll.last_total);
+        s.scroll_to_top();
+        assert_eq!(s.scroll.offset, s.scroll.last_total - 8);
+        let rows = render(&mut s, 20, 12);
+        assert!(rows[0].starts_with("word"), "{rows:?}");
+    }
+
+    #[test]
+    fn centered_rect_is_centered() {
+        let area = Rect::new(0, 0, 100, 50);
+        let centered = centered_rect(50, 50, area);
+
+        // Should be roughly centered
+        assert!(centered.x > 20);
+        assert!(centered.x < 60);
+        assert!(centered.y > 10);
+        assert!(centered.y < 30);
+    }
+}

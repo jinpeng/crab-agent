@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use crab_core::agent::{Agent, AgentConfig};
-use crab_core::gate::PermissionGate;
+use crab_core::gate::{Confirmer, PermissionGate};
 use crab_core::mcp::{McpClient, McpTool};
 use crab_core::provider::Provider;
 use crab_core::provider::openai::OpenAiProvider;
@@ -75,9 +75,14 @@ pub fn latest_session(dir: &Path) -> Option<PathBuf> {
 /// registered in the agent's registry: dropping one closes the connection and
 /// kills its process, so the caller **must** keep them alive for as long as the
 /// agent may call those tools.
+///
+/// `confirmer` is optional: if `None`, the default behavior is used
+/// (--yolo, --print, or a simple terminal confirmer). Pass `Some(confirmer)`
+/// to override, e.g., for the TUI's channel-based confirmer.
 pub async fn build_agent(
     cfg: &AppConfig,
     continue_: bool,
+    confirmer: Option<Confirmer>,
 ) -> Result<(
     Agent,
     String,
@@ -124,13 +129,16 @@ pub async fn build_agent(
         };
 
     // Permission routing (Q9): --yolo all-allow; --print auto-approve (no one to ask);
-    // interactive asks on the terminal.
+    // interactive uses the provided confirmer (TUI's channel-based one).
     let gate = if cfg.yolo {
         PermissionGate::yolo()
     } else if cfg.non_interactive {
         PermissionGate::auto_approve()
+    } else if let Some(c) = confirmer {
+        PermissionGate::with_confirmer(c)
     } else {
-        PermissionGate::with_confirmer(crate::confirm::terminal_confirmer())
+        // Fallback (shouldn't normally happen, but provide a safe default)
+        PermissionGate::auto_deny()
     };
     let mut tools = register_all(SessionState::default(), gate.clone());
     // MCP servers come up before the session is created: a server that fails to

@@ -1,19 +1,10 @@
 use clap::Parser;
 
 mod app;
-mod confirm;
-mod interactive;
 mod render;
-// TODO: used by interactive.rs once it renders the bottom status line;
-// until then, silence dead_code.
-#[allow(dead_code)]
 mod status;
-// TODO: used by render.rs once it consumes the theme; until then, silence dead_code.
-#[allow(dead_code)]
 mod theme;
-// TODO: used by render.rs once it truncates styled output to the terminal width;
-// until then, silence dead_code.
-#[allow(dead_code)]
+mod tui;
 mod width;
 
 #[derive(Parser)]
@@ -44,14 +35,14 @@ async fn main() -> anyhow::Result<()> {
         return run_print(&cli, prompt).await;
     }
     let cfg = app::AppConfig::from(&cli);
-    interactive::run_interactive(&cfg, cli.continue_).await
+    tui::run(&cfg, cli.continue_).await
 }
 
 async fn run_print(cli: &Cli, prompt: String) -> anyhow::Result<()> {
     let cfg = app::AppConfig::from(cli);
     // `_mcp` holds the live MCP child processes (see `build_agent`): it must outlive
     // the run below, so it is bound here rather than dropped inside `build_agent`.
-    let (mut agent, _sys, _provider, _mcp) = app::build_agent(&cfg, cli.continue_).await?;
+    let (mut agent, _sys, _provider, _mcp) = app::build_agent(&cfg, cli.continue_, None).await?;
     let rx = agent.subscribe();
     // Render until the channel closes, not until `Finished`: the run loop and the
     // provider→agent bridge task publish to the same channel, so a text delta can

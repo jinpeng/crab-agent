@@ -18,6 +18,8 @@ futures.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 reedline.workspace = true
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
+scopeguard = "1.2.0"
 
 [dev-dependencies]
 assert_cmd = "2.2"
