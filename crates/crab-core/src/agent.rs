@@ -130,24 +130,31 @@ impl Agent {
             tokio::sync::broadcast::channel::<crate::stream::StreamEvent>(64);
         let events_tx2 = self.events_tx.clone();
         let forward = tokio::spawn(async move {
-            while let Ok(ev) = stream_rx.recv().await {
-                if std::env::var("CRAB_DEBUG_FWD").is_ok() {
-                    eprintln!("FWD RECV {ev:?}");
-                }
-                match ev {
-                    crate::stream::StreamEvent::TextDelta(s) => {
-                        let _ = events_tx2.send(AgentEvent::TextDelta(s));
+            loop {
+                match stream_rx.recv().await {
+                    Ok(ev) => {
+                        if std::env::var("CRAB_DEBUG_FWD").is_ok() {
+                            eprintln!("FWD RECV {ev:?}");
+                        }
+                        match ev {
+                            crate::stream::StreamEvent::TextDelta(s) => {
+                                let _ = events_tx2.send(AgentEvent::TextDelta(s));
+                            }
+                            crate::stream::StreamEvent::Usage {
+                                prompt_tokens,
+                                completion_tokens,
+                            } => {
+                                let _ = events_tx2.send(AgentEvent::Usage {
+                                    prompt_tokens,
+                                    completion_tokens,
+                                });
+                            }
+                            _ => {}
+                        }
                     }
-                    crate::stream::StreamEvent::Usage {
-                        prompt_tokens,
-                        completion_tokens,
-                    } => {
-                        let _ = events_tx2.send(AgentEvent::Usage {
-                            prompt_tokens,
-                            completion_tokens,
-                        });
-                    }
-                    _ => {}
+                    // Lagging only loses text deltas, not Finished — skip and continue.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -156,6 +163,11 @@ impl Agent {
         drop(stream_tx);
         forward.abort();
         let _ = forward.await;
+        // Reset the abort token for the next run: CancellationToken::cancel() is
+        // permanent, so without this a single Ctrl-C would make every subsequent
+        // run return Aborted instantly. Callers fetch abort_token() before each
+        // run, so resetting here (after the run is over) is safe.
+        self.abort = tokio_util::sync::CancellationToken::new();
         result
     }
 

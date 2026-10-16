@@ -518,9 +518,15 @@ impl Bubble {
                     } else {
                         r.text.clone()
                     };
-                    for line in result_text.lines().take(5) {
+                    for (i, line) in result_text.lines().take(5).enumerate() {
+                        // Marker on the first line only; continuations align under it.
+                        let prefix = if i == 0 {
+                            format!("  {marker} ")
+                        } else {
+                            "    ".to_string()
+                        };
                         lines.push(Line::from(vec![
-                            Span::styled(format!("  {} ", marker), style),
+                            Span::styled(prefix, style),
                             Span::styled(line.to_string(), Theme::dim()),
                         ]));
                     }

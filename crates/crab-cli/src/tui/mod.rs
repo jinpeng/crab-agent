@@ -36,8 +36,10 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     // Create confirmation bridge before building agent
     let bridge = ConfirmBridge::new();
 
-    // Channel for UI events (agent events + confirm requests)
-    let (ui_tx, ui_rx) = std::sync::mpsc::sync_channel::<UiEvent>(64);
+    // Channel for UI events (agent events + confirm requests).
+    // Unbounded: senders include tokio worker threads (agent forwarder, confirmer),
+    // and a blocking send on a full bounded channel would stall the executor.
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
 
     // Give the bridge a sender for confirm requests
     bridge.set_sender(ui_tx.clone());
@@ -52,7 +54,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     model_names.push("mock".to_string());
 
     // Subscribe to agent events
-    let mut agent_rx = agent.subscribe();
+    let agent_rx = agent.subscribe();
 
     // Channel for UI commands (submit, abort, quit)
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<UiCommand>(16);
@@ -70,15 +72,14 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     // would corrupt the alt-screen.
     let err_tx = ui_tx.clone();
 
-    // Forward agent events in a background task
+    // Forward agent events in a background task.
+    // A broadcast receiver returns Err(Lagged) when it falls more than the channel
+    // capacity behind — a long streaming reply produces hundreds of TextDeltas, so
+    // lagging is NORMAL, not fatal. Skipping is safe here because the TUI state is
+    // a fold over events and Finished is what matters; if we exited the loop on a
+    // lag, Finished would be lost and the UI would lock up in "streaming" forever.
     let forward_tx = ui_tx.clone();
-    let forward_handle = tokio::spawn(async move {
-        while let Ok(ev) = agent_rx.recv().await {
-            if forward_tx.send(UiEvent::Agent(ev)).is_err() {
-                break;
-            }
-        }
-    });
+    let forward_handle = tokio::spawn(forward_agent_events(agent_rx, forward_tx));
 
     // Setup terminal
     terminal::enable_raw_mode()?;
@@ -184,6 +185,34 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     forward_handle.abort();
     let _ = forward_handle.await;
     Ok(())
+}
+
+/// Forward agent events to the UI channel until the agent is dropped.
+///
+/// A broadcast receiver returns `Err(Lagged)` when it falls more than the channel
+/// capacity behind — a long streaming reply produces hundreds of TextDeltas, so
+/// lagging is NORMAL, not fatal. If we exited the loop on a lag, `Finished` would
+/// be lost and the UI would lock up in "streaming" forever (the yolo-hang bug).
+async fn forward_agent_events(
+    mut agent_rx: tokio::sync::broadcast::Receiver<AgentEvent>,
+    ui_tx: std::sync::mpsc::Sender<UiEvent>,
+) {
+    loop {
+        match agent_rx.recv().await {
+            Ok(ev) => {
+                if ui_tx.send(UiEvent::Agent(ev)).is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                // Surface the drop so a garbled transcript is explainable.
+                let _ = ui_tx.send(UiEvent::Error(format!(
+                    "[warn] dropped {n} events (UI fell behind)"
+                )));
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
 }
 
 /// Commands from TUI to async handler.
@@ -515,5 +544,51 @@ fn handle_confirm_key(code: KeyCode, _modifiers: KeyModifiers) -> Option<Decisio
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Decision::Deny),
         KeyCode::Char('a') | KeyCode::Char('A') => Some(Decision::AllowAll),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the yolo-hang: when a long streaming reply overflows the
+    /// broadcast channel, the forwarder must skip the lagged events and keep going —
+    /// exiting the loop would lose `Finished` and lock the UI in "streaming" forever.
+    // Multi-threaded: draining the std::sync::mpsc receiver blocks the calling
+    // thread, so the forwarder needs another worker thread to make progress.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forwarder_survives_broadcast_lag() {
+        // Tiny capacity forces a lag: 10 events pending before the forwarder polls.
+        let (tx, rx) = tokio::sync::broadcast::channel(4);
+        for i in 0..10 {
+            tx.send(AgentEvent::TextDelta(format!("delta-{i}")))
+                .unwrap();
+        }
+        tx.send(AgentEvent::Finished {
+            reason: crab_core::types::StopReason::EndTurn,
+        })
+        .unwrap();
+
+        let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+        let handle = tokio::spawn(forward_agent_events(rx, ui_tx));
+
+        let mut saw_lag_notice = false;
+        let mut saw_finished = false;
+        // Drain until Finished arrives or the channel closes (tx dropped below).
+        for ev in ui_rx.iter() {
+            match ev {
+                UiEvent::Error(m) if m.contains("dropped") => saw_lag_notice = true,
+                UiEvent::Agent(AgentEvent::Finished { .. }) => {
+                    saw_finished = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_lag_notice, "expected a lag notice");
+        assert!(saw_finished, "Finished must not be lost to a lag");
+
+        drop(tx);
+        handle.await.unwrap();
     }
 }
