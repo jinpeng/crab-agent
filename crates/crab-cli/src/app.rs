@@ -88,6 +88,8 @@ pub async fn build_agent(
     String,
     crab_core::config::ResolvedProvider,
     Vec<Arc<McpClient>>,
+    PermissionGate,
+    crab_core::config::Config,
 )> {
     let cwd = std::env::current_dir().context("cwd")?;
     let system_prompt = build_system_prompt(&cwd, cfg.system.clone());
@@ -98,35 +100,7 @@ pub async fn build_agent(
         crab_core::config::Config::load_from(None).map_err(|e| anyhow::anyhow!("config: {e}"))?;
 
     let (provider, resolved): (Box<dyn Provider>, crab_core::config::ResolvedProvider) =
-        match cfg.provider.as_deref() {
-            Some("mock") => (
-                Box::new(crab_core::provider::MockProvider::new(vec![vec![
-                    crab_core::stream::StreamEvent::TextDelta("mock response".into()),
-                    crab_core::stream::StreamEvent::StreamEnd {
-                        reason: crab_core::types::StopReason::EndTurn,
-                    },
-                ]])),
-                crab_core::config::ResolvedProvider {
-                    base_url: String::new(),
-                    model: "mock".into(),
-                    api_key: String::new(),
-                    context_window: None,
-                    provider_name: "mock".into(),
-                },
-            ),
-            name => {
-                let r = crab_core::config::resolve_credentials(&config, name, &|k| {
-                    std::env::var(k).ok()
-                })
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let provider = Box::new(OpenAiProvider::new(
-                    r.base_url.clone(),
-                    r.api_key.clone(),
-                    r.model.clone(),
-                ));
-                (provider, r)
-            }
-        };
+        resolve_provider(&config, cfg.provider.as_deref())?;
 
     // Permission routing (Q9): --yolo all-allow; --print auto-approve (no one to ask);
     // interactive uses the provided confirmer (TUI's channel-based one).
@@ -143,7 +117,7 @@ pub async fn build_agent(
     let mut tools = register_all(SessionState::default(), gate.clone());
     // MCP servers come up before the session is created: a server that fails to
     // start is only ever a warning, never a reason not to start crab.
-    let mcp_clients = attach_mcp_servers(&config, gate, &mut tools).await;
+    let mcp_clients = attach_mcp_servers(&config, gate.clone(), &mut tools).await;
 
     let dir = sessions_dir(&cwd);
     let session = if continue_ {
@@ -162,7 +136,44 @@ pub async fn build_agent(
             system_prompt: system_prompt.clone(),
         },
     );
-    Ok((agent, system_prompt, resolved, mcp_clients))
+    Ok((agent, system_prompt, resolved, mcp_clients, gate, config))
+}
+
+/// Build a provider for the given profile name, resolving credentials the same
+/// way startup does. Used by the TUI's `/model` to swap models mid-session.
+/// Returns the provider and its resolved config (for the status line).
+pub fn resolve_provider(
+    config: &crab_core::config::Config,
+    name: Option<&str>,
+) -> Result<(Box<dyn Provider>, crab_core::config::ResolvedProvider)> {
+    match name {
+        Some("mock") => Ok((
+            Box::new(crab_core::provider::MockProvider::new(vec![vec![
+                crab_core::stream::StreamEvent::TextDelta("mock response".into()),
+                crab_core::stream::StreamEvent::StreamEnd {
+                    reason: crab_core::types::StopReason::EndTurn,
+                },
+            ]])),
+            crab_core::config::ResolvedProvider {
+                base_url: String::new(),
+                model: "mock".into(),
+                api_key: String::new(),
+                context_window: None,
+                provider_name: "mock".into(),
+            },
+        )),
+        _ => {
+            let r =
+                crab_core::config::resolve_credentials(config, name, &|k| std::env::var(k).ok())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let provider = Box::new(OpenAiProvider::new(
+                r.base_url.clone(),
+                r.api_key.clone(),
+                r.model.clone(),
+            ));
+            Ok((provider, r))
+        }
+    }
 }
 
 /// Spawn every enabled `[mcp.*]` server and register its tools into `tools`.

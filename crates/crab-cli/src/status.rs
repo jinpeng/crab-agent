@@ -65,6 +65,11 @@ impl StatusLine {
         self.state = state;
     }
 
+    /// Update the provider/model label (e.g. after `/model`).
+    pub fn set_provider_model(&mut self, provider_model: String) {
+        self.provider_model = provider_model;
+    }
+
     /// Replace the number of tokens used so far.
     pub fn set_tokens_used(&mut self, tokens_used: u64) {
         self.tokens_used = tokens_used;

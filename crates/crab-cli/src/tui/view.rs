@@ -1,13 +1,13 @@
 //! Rendering logic for the TUI.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{
         Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
-    Frame,
 };
 
 use super::state::{Theme, TuiState};
@@ -17,9 +17,9 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),      // Transcript
-            Constraint::Length(1),   // Status line
-            Constraint::Length(3),   // Input box
+            Constraint::Min(3),    // Transcript
+            Constraint::Length(1), // Status line
+            Constraint::Length(3), // Input box
         ])
         .split(f.area());
 
@@ -30,6 +30,11 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
     // Draw confirm modal on top if active
     if state.confirm.is_some() {
         draw_confirm_modal(f, state);
+    }
+
+    // Draw model picker on top if open
+    if state.picker.is_some() {
+        draw_picker(f, state);
     }
 }
 
@@ -114,14 +119,16 @@ fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
     };
 
     let input_lines = state.input.to_lines(area.width);
-    let paragraph = Paragraph::new(input_lines)
-        .style(style)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(if is_running { " running... (Ctrl-C to abort) " } else { "" }),
-        );
+    let paragraph = Paragraph::new(input_lines).style(style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(if is_running {
+                " running... (Ctrl-C to abort) "
+            } else {
+                ""
+            }),
+    );
 
     f.render_widget(paragraph, area);
 
@@ -139,7 +146,10 @@ fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
             6 + input_text[..cursor_byte].chars().count()
         } else {
             // Subsequent lines: "      " prefix (6 chars) + column offset on that line
-            let line_start = input_text[..cursor_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_start = input_text[..cursor_byte]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             6 + input_text[line_start..cursor_byte].chars().count()
         };
 
@@ -174,16 +184,66 @@ fn draw_confirm_modal(f: &mut Frame, state: &TuiState) {
         pending.prompt.tool, pending.prompt.summary
     );
 
-    let paragraph = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
-                .title(" Permission "),
-        );
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Permission "),
+    );
 
     f.render_widget(paragraph, area);
+}
+
+/// Draw the model picker overlay.
+fn draw_picker(f: &mut Frame, state: &TuiState) {
+    let picker = match &state.picker {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Size to content, capped.
+    let height = (picker.items.len() as u16 + 2).min(15);
+    let width = picker
+        .items
+        .iter()
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(10)
+        .max(20) as u16
+        + 4;
+    let area = centered_rect_abs(width, height, f.area());
+    f.render_widget(Clear, area);
+
+    let lines: Vec<Line> = picker
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            if i == picker.selected {
+                Line::from(vec![Span::styled(
+                    format!("> {name}"),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                )])
+            } else {
+                Line::from(format!("  {name}"))
+            }
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Select model (↑↓/jk, Enter, Esc) "),
+    );
+    f.render_widget(paragraph, area);
+}
+
+/// Centered rect with absolute width/height.
+fn centered_rect_abs(width: u16, height: u16, r: Rect) -> Rect {
+    let x = r.x + r.width.saturating_sub(width) / 2;
+    let y = r.y + r.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(r.width), height.min(r.height))
 }
 
 /// Helper to create a centered rect.
@@ -211,7 +271,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::tui::state::Bubble;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn state_with(n: usize) -> TuiState {
         let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);

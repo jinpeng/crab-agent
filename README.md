@@ -47,7 +47,15 @@ Or start the interactive session:
 crab
 ```
 
-The prompt is `crab> `. Type `/quit` (or `/exit`) to leave, or press Ctrl-D.
+The prompt is `crab> `. Slash commands:
+
+| command | effect |
+| --- | --- |
+| `/quit` (or `/exit`, `/q`) | leave |
+| `/yolo` | toggle allow-all: auto-approve every tool call for the rest of the session |
+| `/model <name>` | switch to the named provider profile from `~/.crab/config.toml` |
+| `/models` | open a picker to choose a profile with ↑↓/Enter |
+
 While the agent is running, **Ctrl-C aborts the current run** (it does not exit
 `crab` — the text and tool results produced so far are kept on disk). A Ctrl-C
 at an idle prompt just clears the input line.

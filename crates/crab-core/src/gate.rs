@@ -60,6 +60,22 @@ impl PermissionGate {
         }
     }
 
+    /// Whether the gate currently lets every operation through without asking.
+    /// True when constructed via [`PermissionGate::yolo`], or after any confirmer
+    /// answered [`Decision::AllowAll`].
+    pub fn is_permissive(&self) -> bool {
+        self.yolo || self.allow_all.load(Ordering::SeqCst)
+    }
+
+    /// Toggle the session-wide "allow all" latch. This is the same latch
+    /// [`Decision::AllowAll`] sets, so toggling on behaves exactly like answering
+    /// `[a]ll` once. Toggling off restores per-call confirmation — unless this gate
+    /// was built with [`PermissionGate::yolo`], in which case it stays permissive
+    /// (that mode is a CLI flag, not a runtime toggle).
+    pub fn set_allow_all(&self, on: bool) {
+        self.allow_all.store(on, Ordering::SeqCst);
+    }
+
     pub fn check(&self, p: Prompt) -> Result<(), ToolError> {
         if self.yolo || self.allow_all.load(Ordering::SeqCst) {
             return Ok(());

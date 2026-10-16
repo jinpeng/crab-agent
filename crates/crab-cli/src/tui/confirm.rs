@@ -4,12 +4,12 @@ use crab_core::gate::{Confirmer, Decision, Prompt};
 use std::sync::{Arc, Mutex};
 
 /// Shared state for confirm bridge.
-/// 
+///
 /// The Confirmer closure captures an Arc<ConfirmBridgeInner> and uses it
 /// to communicate with the TUI event loop via sync channels.
 #[derive(Debug)]
 struct ConfirmBridgeInner {
-    sender: Mutex<Option<std::sync::mpsc::SyncSender<super::UiEvent>>>,
+    sender: Mutex<Option<std::sync::mpsc::Sender<super::UiEvent>>>,
 }
 
 impl ConfirmBridgeInner {
@@ -19,7 +19,7 @@ impl ConfirmBridgeInner {
         }
     }
 
-    fn set_sender(&self, tx: std::sync::mpsc::SyncSender<super::UiEvent>) {
+    fn set_sender(&self, tx: std::sync::mpsc::Sender<super::UiEvent>) {
         *self.sender.lock().unwrap() = Some(tx);
     }
 
@@ -53,7 +53,7 @@ impl ConfirmBridge {
     }
 
     /// Set the sender for confirm requests (called after creation).
-    pub fn set_sender(&self, tx: std::sync::mpsc::SyncSender<super::UiEvent>) {
+    pub fn set_sender(&self, tx: std::sync::mpsc::Sender<super::UiEvent>) {
         self.inner.set_sender(tx);
     }
 

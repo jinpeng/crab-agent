@@ -25,10 +25,7 @@ pub enum Bubble {
     /// User message.
     User(String),
     /// Assistant text (streaming or complete).
-    Assistant {
-        text: String,
-        complete: bool,
-    },
+    Assistant { text: String, complete: bool },
     /// Tool call with optional result.
     Tool {
         id: ToolCallId,
@@ -54,7 +51,9 @@ pub struct Theme;
 
 impl Theme {
     pub fn user() -> Style {
-        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn assistant() -> Style {
@@ -144,6 +143,65 @@ impl ScrollState {
     }
 }
 
+/// Model picker overlay state (the `/model` menu).
+#[derive(Debug, Clone)]
+pub struct ModelPicker {
+    /// Available provider profile names.
+    pub items: Vec<String>,
+    /// Currently highlighted index.
+    pub selected: usize,
+}
+
+impl ModelPicker {
+    pub fn new(items: Vec<String>, current: usize) -> Self {
+        let selected = current.min(items.len().saturating_sub(1));
+        Self { items, selected }
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
+    }
+
+    pub fn selected_name(&self) -> Option<&str> {
+        self.items.get(self.selected).map(String::as_str)
+    }
+}
+
+/// A parsed slash command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SlashCommand {
+    Quit,
+    Yolo,
+    /// Open the model picker (`/model`) or switch directly (`/model <name>`).
+    Model(Option<String>),
+    /// Open the interactive model picker (`/models`).
+    PickModel,
+    /// Unrecognized `/something`.
+    Unknown(String),
+}
+
+/// Parse a slash command line (leading `/` already stripped of surrounding space).
+/// Pure and total: never panics, unknown commands fall through to `Unknown`.
+pub fn parse_slash(text: &str) -> Option<SlashCommand> {
+    let t = text.trim();
+    let rest = t.strip_prefix('/')?;
+    let (cmd, arg) = match rest.split_once(|c: char| c.is_whitespace()) {
+        Some((c, a)) => (c, Some(a.trim().to_string()).filter(|s| !s.is_empty())),
+        None => (rest, None),
+    };
+    Some(match cmd {
+        "quit" | "exit" | "q" => SlashCommand::Quit,
+        "yolo" => SlashCommand::Yolo,
+        "model" | "m" => SlashCommand::Model(arg),
+        "models" => SlashCommand::PickModel,
+        other => SlashCommand::Unknown(other.to_string()),
+    })
+}
+
 /// Full TUI state.
 pub struct TuiState {
     /// Transcript bubbles.
@@ -160,13 +218,23 @@ pub struct TuiState {
     pub confirm: Option<PendingConfirm>,
     /// Should quit flag.
     pub should_quit: bool,
+    /// Model picker overlay, when open.
+    pub picker: Option<ModelPicker>,
+    /// Yolo (allow-all) flag, mirrored from the permission gate for the status line.
+    pub yolo: bool,
+    /// Current provider label for the picker (e.g. "openai/gpt-4o-mini").
+    pub provider_label: String,
     /// Cached tool args from AssistantMessage (for showing in tool bubbles).
     tool_args_cache: HashMap<ToolCallId, String>,
 }
 
 impl TuiState {
-    pub fn new(provider_model: String, cwd: std::path::PathBuf, context_window: Option<u64>) -> Self {
-        let mut status = StatusLine::new(provider_model, cwd);
+    pub fn new(
+        provider_model: String,
+        cwd: std::path::PathBuf,
+        context_window: Option<u64>,
+    ) -> Self {
+        let mut status = StatusLine::new(provider_model.clone(), cwd);
         status.set_context(None, context_window);
         Self {
             bubbles: Vec::new(),
@@ -176,8 +244,24 @@ impl TuiState {
             run_state: RunState::Idle,
             confirm: None,
             should_quit: false,
+            picker: None,
+            yolo: false,
+            provider_label: provider_model.clone(),
             tool_args_cache: HashMap::new(),
         }
+    }
+
+    /// Show a system notice in the transcript.
+    pub fn notice(&mut self, msg: impl Into<String>) {
+        self.bubbles.push(Bubble::System(msg.into()));
+        if self.scroll.follow {
+            self.scroll.offset = 0;
+        }
+    }
+
+    /// Update the provider label shown in the status line (after `/model`).
+    pub fn set_provider_label(&mut self, label: String) {
+        self.provider_label = label;
     }
 
     /// Is the agent currently running?
@@ -231,13 +315,12 @@ impl TuiState {
             TextDelta(s) => {
                 self.set_run_state(RunState::Streaming);
                 // Append to current assistant bubble or create new one
-                if let Some(last) = self.bubbles.last_mut() {
-                    if let Bubble::Assistant { text, complete } = last {
-                        if !*complete {
-                            text.push_str(&s);
-                            return;
-                        }
-                    }
+                if let Some(last) = self.bubbles.last_mut()
+                    && let Bubble::Assistant { text, complete } = last
+                    && !*complete
+                {
+                    text.push_str(&s);
+                    return;
                 }
                 // No open assistant bubble, create new
                 self.bubbles.push(Bubble::Assistant {
@@ -254,21 +337,23 @@ impl TuiState {
             } => {
                 let used = (prompt_tokens + completion_tokens) as u64;
                 self.status.set_tokens_used(used);
-                self.status.set_context(Some(used), self.status.context_window());
+                self.status
+                    .set_context(Some(used), self.status.context_window());
             }
             AssistantMessage(msg) => {
                 // Cache tool args and mark assistant bubble as complete
                 for block in &msg.content {
                     if let crab_core::types::ContentBlock::ToolUse { id, name, input } = block {
                         let args_str = compact_json(input);
-                        self.tool_args_cache.insert(id.clone(), format!("{name} {args_str}"));
+                        self.tool_args_cache
+                            .insert(id.clone(), format!("{name} {args_str}"));
                     }
                 }
                 // Mark current assistant bubble as complete
-                if let Some(last) = self.bubbles.last_mut() {
-                    if let Bubble::Assistant { complete, .. } = last {
-                        *complete = true;
-                    }
+                if let Some(last) = self.bubbles.last_mut()
+                    && let Bubble::Assistant { complete, .. } = last
+                {
+                    *complete = true;
                 }
             }
             ToolCallStarted { id, name } => {
@@ -292,16 +377,18 @@ impl TuiState {
                 self.set_run_state(RunState::Streaming);
                 // Find the tool bubble and set result
                 for bubble in self.bubbles.iter_mut().rev() {
-                    if let Bubble::Tool { id: bid, result: r, .. } = bubble {
-                        if *bid == id {
-                            let (text, truncated) = truncate_result(&result);
-                            *r = Some(ToolResult {
-                                text,
-                                is_error,
-                                truncated,
-                            });
-                            break;
-                        }
+                    if let Bubble::Tool {
+                        id: bid, result: r, ..
+                    } = bubble
+                        && *bid == id
+                    {
+                        let (text, truncated) = truncate_result(&result);
+                        *r = Some(ToolResult {
+                            text,
+                            is_error,
+                            truncated,
+                        });
+                        break;
                     }
                 }
             }
@@ -348,11 +435,7 @@ fn compact_json(v: &serde_json::Value) -> String {
                 .map(|(k, v)| format!("{}={}", k, compact_json_value(v)))
                 .collect();
             let s = pairs.join(" ");
-            if m.len() > 3 {
-                format!("{} ...", s)
-            } else {
-                s
-            }
+            if m.len() > 3 { format!("{} ...", s) } else { s }
         }
         _ => v.to_string(),
     }
@@ -435,21 +518,25 @@ impl Bubble {
                     } else {
                         r.text.clone()
                     };
-                    for line in result_text.lines().take(5) {
+                    for (i, line) in result_text.lines().take(5).enumerate() {
+                        // Marker on the first line only; continuations align under it.
+                        let prefix = if i == 0 {
+                            format!("  {marker} ")
+                        } else {
+                            "    ".to_string()
+                        };
                         lines.push(Line::from(vec![
-                            Span::styled(format!("  {} ", marker), style),
+                            Span::styled(prefix, style),
                             Span::styled(line.to_string(), Theme::dim()),
                         ]));
                     }
                 }
                 Text::from(lines)
             }
-            Bubble::System(text) => {
-                Text::from(Line::from(vec![Span::styled(
-                    text.clone(),
-                    Style::default().fg(Color::Yellow),
-                )]))
-            }
+            Bubble::System(text) => Text::from(Line::from(vec![Span::styled(
+                text.clone(),
+                Style::default().fg(Color::Yellow),
+            )])),
         }
     }
 }
@@ -623,5 +710,54 @@ mod tests {
     fn page_is_a_screenful_minus_one() {
         assert_eq!(scrolled(100, 10).page(), 9);
         assert_eq!(scrolled(100, 0).page(), 1);
+    }
+
+    #[test]
+    fn parse_slash_recognizes_commands() {
+        assert_eq!(parse_slash("/quit"), Some(SlashCommand::Quit));
+        assert_eq!(parse_slash("/exit"), Some(SlashCommand::Quit));
+        assert_eq!(parse_slash("/q"), Some(SlashCommand::Quit));
+        assert_eq!(parse_slash("/yolo"), Some(SlashCommand::Yolo));
+        assert_eq!(parse_slash("/model"), Some(SlashCommand::Model(None)));
+        assert_eq!(
+            parse_slash("/model deepseek"),
+            Some(SlashCommand::Model(Some("deepseek".into())))
+        );
+        assert_eq!(
+            parse_slash("/m gpt-4o"),
+            Some(SlashCommand::Model(Some("gpt-4o".into())))
+        );
+        assert_eq!(parse_slash("/models"), Some(SlashCommand::PickModel));
+        assert_eq!(
+            parse_slash("/frobnicate"),
+            Some(SlashCommand::Unknown("frobnicate".into()))
+        );
+        // Not a slash command
+        assert_eq!(parse_slash("hello"), None);
+        assert_eq!(parse_slash(""), None);
+        // Leading whitespace tolerated
+        assert_eq!(parse_slash("  /yolo  "), Some(SlashCommand::Yolo));
+    }
+
+    #[test]
+    fn model_picker_navigation() {
+        let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut p = ModelPicker::new(items, 0);
+        assert_eq!(p.selected_name(), Some("a"));
+        p.move_down();
+        assert_eq!(p.selected_name(), Some("b"));
+        p.move_down();
+        p.move_down(); // clamps at end
+        assert_eq!(p.selected_name(), Some("c"));
+        p.move_up();
+        assert_eq!(p.selected_name(), Some("b"));
+    }
+
+    #[test]
+    fn model_picker_selected_clamped_to_nonempty() {
+        let items = vec!["only".to_string()];
+        let p = ModelPicker::new(items, 99);
+        assert_eq!(p.selected, 0);
+        assert_eq!(p.selected_name(), Some("only"));
     }
 }

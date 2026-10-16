@@ -1,7 +1,7 @@
 //! Simple multi-line input buffer with cursor tracking.
 
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::style::{Style, Color};
 
 /// Input buffer with cursor position.
 #[derive(Debug, Clone)]
@@ -74,8 +74,7 @@ impl InputBuffer {
             let end = self.cursor;
             let start = self.text[..end]
                 .char_indices()
-                .rev()
-                .next()
+                .next_back()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             self.text.drain(start..end);
@@ -89,8 +88,7 @@ impl InputBuffer {
             let end = self.cursor;
             let start = self.text[..end]
                 .char_indices()
-                .rev()
-                .next()
+                .next_back()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             self.cursor = start;
@@ -167,17 +165,19 @@ impl InputBuffer {
     /// Render as styled lines for display.
     pub fn to_lines(&self, _width: u16) -> Vec<Line<'static>> {
         if self.text.is_empty() {
-            return vec![Line::from(vec![
-                Span::styled("crab> ", Style::default().fg(Color::Blue)),
-            ])];
+            return vec![Line::from(vec![Span::styled(
+                "crab> ",
+                Style::default().fg(Color::Blue),
+            )])];
         }
 
         // Split into lines, preserving newlines in the text
         let lines: Vec<&str> = self.text.lines().collect();
         if lines.is_empty() {
-            return vec![Line::from(vec![
-                Span::styled("crab> ", Style::default().fg(Color::Blue)),
-            ])];
+            return vec![Line::from(vec![Span::styled(
+                "crab> ",
+                Style::default().fg(Color::Blue),
+            )])];
         }
 
         let mut result = Vec::new();
