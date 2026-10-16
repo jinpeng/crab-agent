@@ -5,6 +5,16 @@
 //! codes (`\x1b[36m`, `\x1b[0m`, ...) are embedded in it. v0 only understands
 //! color codes: every non-escape char counts as one column.
 
+/// Display width of `s` in terminal columns, using a Unicode width table.
+///
+/// Wide (CJK) chars count 2, combining/zero-width chars count 0, everything
+/// else counts 1. Use this for anything that positions the cursor or aligns
+/// text; [`visible_width`] is the ANSI-stripping variant for plain strings.
+pub fn display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(s)
+}
+
 /// The SGR reset sequence, used to close any styling still open.
 const RESET: &str = "\x1b[0m";
 

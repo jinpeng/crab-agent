@@ -120,6 +120,18 @@ fn running_title(state: &TuiState) -> String {
     )
 }
 
+/// Cursor column within the input area: the 6-column prompt prefix plus the
+/// display width of the current line up to the cursor. Display width, not
+/// char count — a CJK char occupies two columns, so counting `chars()` puts
+/// the cursor one cell short per wide char.
+fn cursor_column(input_text: &str, cursor_byte: usize) -> usize {
+    let line_start = input_text[..cursor_byte]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    6 + crate::width::display_width(&input_text[line_start..cursor_byte])
+}
+
 /// Draw the input box.
 fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
     let is_running = state.is_running();
@@ -157,20 +169,8 @@ fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
         let input_text = state.input.text();
         let cursor_byte = state.input.cursor();
 
-        // Count lines before cursor
-        let lines_before_cursor = input_text[..cursor_byte].lines().count();
-        let cursor_line = lines_before_cursor;
-        let cursor_col = if lines_before_cursor == 0 {
-            // First line: "crab> " prefix (6 chars) + column offset
-            6 + input_text[..cursor_byte].chars().count()
-        } else {
-            // Subsequent lines: "      " prefix (6 chars) + column offset on that line
-            let line_start = input_text[..cursor_byte]
-                .rfind('\n')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            6 + input_text[line_start..cursor_byte].chars().count()
-        };
+        let cursor_line = input_text[..cursor_byte].lines().count();
+        let cursor_col = cursor_column(input_text, cursor_byte);
 
         // The input box has a border, so add 1 to x and y
         let cursor_x = area.x + 1 + cursor_col as u16;
@@ -296,6 +296,20 @@ mod tests {
         let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);
         push_entries(&mut s, 0..n);
         s
+    }
+
+    #[test]
+    fn cursor_column_counts_display_width_not_chars() {
+        // 3 ASCII chars: 6 (prompt) + 3.
+        assert_eq!(cursor_column("abc", 3), 9);
+        // "输" is one char but two columns: cursor after it sits at 6 + 2.
+        assert_eq!(cursor_column("输", 3), 8);
+        // "输入框" fully typed: 6 + 6.
+        assert_eq!(cursor_column("输入框", 9), 12);
+        // Mixed: 6 + 1 + 4 = 11.
+        assert_eq!(cursor_column("a输入", "a输入".len()), 11);
+        // Second line after a newline: prefix still applies.
+        assert_eq!(cursor_column("ab\n输c", "ab\n输c".len()), 6 + 3);
     }
 
     #[test]
