@@ -62,7 +62,6 @@ async fn agent_drives_real_read_tool_via_openai_provider() {
         tools,
         session,
         AgentConfig {
-            max_turns: 10,
             ..Default::default()
         },
     );

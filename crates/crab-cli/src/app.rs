@@ -132,7 +132,6 @@ pub async fn build_agent(
         tools,
         session,
         AgentConfig {
-            max_turns: 50,
             system_prompt: system_prompt.clone(),
         },
     );

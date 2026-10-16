@@ -5,7 +5,6 @@ use crate::types::{ContentBlock, EntryId, Message, Role, StopReason, ToolCallId}
 
 #[derive(Debug, Default)]
 pub struct AgentConfig {
-    pub max_turns: usize,
     /// Prepended to the provider request as the system message. Empty = not injected.
     /// Not part of session history (it's per-run config, not conversation).
     pub system_prompt: String,
@@ -17,8 +16,6 @@ pub enum AgentError {
     Provider(#[from] ProviderError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("exceeded max_turns {0}")]
-    MaxTurns(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,7 +180,7 @@ impl Agent {
         self.record(user.clone())?;
         self.history.push(user);
 
-        for turn in 0..self.config.max_turns {
+        for turn in 0usize.. {
             // Tool results from the prior turn are already recorded (Q11), so aborting
             // here cannot leave an orphan tool_use. Check before the next model call.
             if self.abort.is_cancelled() {
@@ -266,7 +263,8 @@ impl Agent {
             self.record(tool_result_msg.clone())?;
             self.history.push(tool_result_msg);
         }
-        Err(AgentError::MaxTurns(self.config.max_turns))
+        // An unbounded range only ends via `return` above (EndTurn / error / abort).
+        unreachable!("the turn loop exits only through return")
     }
 
     fn record(&mut self, m: Message) -> Result<(), AgentError> {
@@ -340,7 +338,6 @@ pub(crate) mod tests {
             tools,
             session,
             AgentConfig {
-                max_turns: 10,
                 ..Default::default()
             },
         );
@@ -387,7 +384,6 @@ pub(crate) mod tests {
             tools,
             session,
             AgentConfig {
-                max_turns: 10,
                 ..Default::default()
             },
         );
@@ -482,7 +478,6 @@ mod bridge_tests {
             tools,
             session,
             AgentConfig {
-                max_turns: 5,
                 ..Default::default()
             },
         );
@@ -521,7 +516,6 @@ mod bridge_tests {
             tools,
             session,
             AgentConfig {
-                max_turns: 5,
                 ..Default::default()
             },
         );
@@ -583,7 +577,6 @@ mod system_prompt_tests {
             tools,
             session,
             AgentConfig {
-                max_turns: 5,
                 system_prompt: "BASE RULES".into(),
             },
         );
@@ -611,7 +604,6 @@ mod system_prompt_tests {
             tools,
             session,
             AgentConfig {
-                max_turns: 5,
                 system_prompt: String::new(),
             },
         );
@@ -670,7 +662,6 @@ mod abort_token_tests {
             tools,
             session,
             AgentConfig {
-                max_turns: 5,
                 ..Default::default()
             },
         );
@@ -732,7 +723,6 @@ mod continue_history_tests {
                 tools,
                 session,
                 AgentConfig {
-                    max_turns: 5,
                     ..Default::default()
                 },
             );
@@ -749,7 +739,6 @@ mod continue_history_tests {
             tools2,
             session2,
             AgentConfig {
-                max_turns: 5,
                 ..Default::default()
             },
         );
