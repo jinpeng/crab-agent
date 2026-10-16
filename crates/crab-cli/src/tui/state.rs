@@ -214,6 +214,8 @@ pub struct TuiState {
     pub status: StatusLine,
     /// Run state (idle/streaming/tool).
     pub run_state: RunState,
+    /// When the current run started (drives the spinner + elapsed timer).
+    pub run_started: Option<std::time::Instant>,
     /// Pending confirmation, if any.
     pub confirm: Option<PendingConfirm>,
     /// Should quit flag.
@@ -242,6 +244,7 @@ impl TuiState {
             scroll: ScrollState::new(),
             status,
             run_state: RunState::Idle,
+            run_started: None,
             confirm: None,
             should_quit: false,
             picker: None,
@@ -271,8 +274,21 @@ impl TuiState {
 
     /// Update the run state and keep the status line in sync.
     fn set_run_state(&mut self, state: RunState) {
+        // Start the clock on the idle → busy edge; stop it when back to idle.
+        match (self.run_state, state) {
+            (RunState::Idle, s) if s != RunState::Idle => {
+                self.run_started = Some(std::time::Instant::now());
+            }
+            (_, RunState::Idle) => self.run_started = None,
+            _ => {}
+        }
         self.run_state = state;
         self.status.set_state(state);
+    }
+
+    /// How long the current run has been going, if any.
+    pub fn run_elapsed(&self) -> Option<std::time::Duration> {
+        self.run_started.map(|t| t.elapsed())
     }
 
     /// Record a submitted user message and mark the agent as busy right away,

@@ -102,6 +102,24 @@ fn draw_status(f: &mut Frame, state: &TuiState, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+/// Braille spinner frames, one per [`SPINNER_FRAME_MS`].
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_FRAME_MS: u128 = 100;
+
+/// Input-box title shown while the agent runs: an animated spinner and an
+/// elapsed timer, so a long turn reads as "working", not "frozen".
+fn running_title(state: &TuiState) -> String {
+    if state.confirm.is_some() {
+        return " waiting for confirmation ".to_string();
+    }
+    let elapsed = state.run_elapsed().unwrap_or_default();
+    let frame = SPINNER[((elapsed.as_millis() / SPINNER_FRAME_MS) as usize) % SPINNER.len()];
+    format!(
+        " {frame} running... {elapsed:.0}s (Ctrl-C to abort) ",
+        elapsed = elapsed.as_secs()
+    )
+}
+
 /// Draw the input box.
 fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
     let is_running = state.is_running();
@@ -119,15 +137,16 @@ fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
     };
 
     let input_lines = state.input.to_lines(area.width);
+    let title = if is_running {
+        running_title(state)
+    } else {
+        String::new()
+    };
     let paragraph = Paragraph::new(input_lines).style(style).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(if is_running {
-                " running... (Ctrl-C to abort) "
-            } else {
-                ""
-            }),
+            .title(title),
     );
 
     f.render_widget(paragraph, area);
@@ -277,6 +296,33 @@ mod tests {
         let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);
         push_entries(&mut s, 0..n);
         s
+    }
+
+    #[test]
+    fn running_title_animates_and_shows_elapsed() {
+        let mut s = state_with(0);
+        s.push_user("go"); // idle -> streaming, starts the clock
+        let a = running_title(&s);
+        assert!(a.contains("running..."), "{a:?}");
+        assert!(a.contains("Ctrl-C"), "{a:?}");
+        assert!(SPINNER.contains(&a.chars().nth(1).unwrap()), "{a:?}");
+
+        // A later moment picks a different frame (time-driven, not state-driven).
+        s.run_started = Some(std::time::Instant::now() - std::time::Duration::from_millis(3100));
+        let b = running_title(&s);
+        assert!(b.contains("3s"), "{b:?}");
+        assert_ne!(a, b, "spinner frame should advance with elapsed time");
+
+        // Confirm prompt replaces the spinner with a static hint.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        s.begin_confirm(
+            crab_core::gate::Prompt {
+                tool: "bash",
+                summary: "ls".into(),
+            },
+            tx,
+        );
+        assert!(running_title(&s).contains("confirmation"));
     }
 
     fn push_entries(s: &mut TuiState, range: std::ops::Range<usize>) {
