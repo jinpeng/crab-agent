@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="crab — a coding agent for the terminal" width="520">
+</p>
+
 # crab
 
 `crab` is a coding agent for the terminal, written in Rust. It is inspired by
