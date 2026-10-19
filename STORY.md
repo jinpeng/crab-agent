@@ -13,7 +13,8 @@ tool loop:
 - **MCP client**: attach external tool servers over stdio (Brave Search verified)
 - **Multi-provider config**: `~/.crab/config.toml` profiles (DeepSeek, Kimi, OpenAI,
   local) with per-field env overrides
-- **Colored TUI** with a live status line (model · state · tokens · context usage · cwd)
+- **Fullscreen TUI** with a live status line (model · state · tokens · context usage ·
+  cwd), a spinner with elapsed timer, and `/yolo` / `/model` slash commands
 - **Persistent sessions** (append-only JSONL, `--continue` resumes with full history)
 - **Permission gate** on anything that writes, runs, or touches the network
 
@@ -27,7 +28,7 @@ commit whose diff was produced entirely by crab itself.** Not a benchmark, not a
 a real commit in the history.
 
 That was reached at commit `f3fec8e` ("dogfood"), where crab added `Session::len` + a
-test. From there it snowballed. Of ~109 commits, **20 were authored by crab** (via
+test. From there it snowballed. Of ~124 commits, **20 were authored by crab** (via
 DeepSeek), each one produced by handing crab a task spec in its own repo and reviewing
 the result:
 
@@ -82,16 +83,19 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 - **`edit` must be literal, never fuzzy** — a loud "no match" beats a silent wrong edit.
 - **The permission gate is a seatbelt, not a boundary.** Command-string allowlists are
   trivially bypassed; real isolation is a container.
+- **Terminals measure width in cells, not chars.** CJK characters take 2 cells,
+  combining characters 0; any `chars().count()` in cursor math or truncation silently
+  misaligns. Use `unicode-width` everywhere width matters.
 
 ## Numbers
 
 | | |
 |---|---|
-| Lines of Rust | ~7,400 |
-| Tests | 179 |
+| Lines of Rust | ~9,300 |
+| Tests | 207 (3 timing-sensitive ignored) |
 | Binary (release) | ~10 MiB |
 | Cold start | sub-second (vs ~150 ms for the Node-based pi it was measured against) |
-| Commits | 109 |
+| Commits | 124 |
 | Commits authored by crab | 20 |
 
 ## Design
@@ -102,7 +106,7 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.1.0. It works, it self-builds, and it's published. The honest label is "early but
+v0.2.0. It works, it self-builds, and it's published. The honest label is "early but
 real": the core loop, tools, config, MCP, and TUI are solid and tested; skills, themes,
 compaction, and a real extension API are deliberately future work.
 
