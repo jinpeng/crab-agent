@@ -31,6 +31,18 @@ pub struct AppConfig {
     pub non_interactive: bool,
 }
 
+/// Everything startup assembles, handed to the CLI/TUI in one piece.
+pub struct Startup {
+    pub agent: Agent,
+    pub system_prompt: String,
+    pub resolved: crab_core::config::ResolvedProvider,
+    /// Live MCP child processes: dropping this kills them, so it must outlive the run.
+    pub mcp_clients: Vec<Arc<McpClient>>,
+    pub gate: PermissionGate,
+    pub config: crab_core::config::Config,
+    pub skills: Vec<crab_core::skills::Skill>,
+}
+
 impl From<&crate::Cli> for AppConfig {
     fn from(c: &crate::Cli) -> Self {
         Self {
@@ -83,15 +95,9 @@ pub async fn build_agent(
     cfg: &AppConfig,
     continue_: bool,
     confirmer: Option<Confirmer>,
-) -> Result<(
-    Agent,
-    String,
-    crab_core::config::ResolvedProvider,
-    Vec<Arc<McpClient>>,
-    PermissionGate,
-    crab_core::config::Config,
-)> {
+) -> Result<Startup> {
     let cwd = std::env::current_dir().context("cwd")?;
+    let skills = crab_core::skills::discover(&cwd, &std::env::home_dir().unwrap_or_default());
     let system_prompt = build_system_prompt(&cwd, cfg.system.clone());
 
     // Loaded once: the provider resolves its credentials from it and the
@@ -135,7 +141,15 @@ pub async fn build_agent(
             system_prompt: system_prompt.clone(),
         },
     );
-    Ok((agent, system_prompt, resolved, mcp_clients, gate, config))
+    Ok(Startup {
+        agent,
+        system_prompt,
+        resolved,
+        mcp_clients,
+        gate,
+        config,
+        skills,
+    })
 }
 
 /// Build a provider for the given profile name, resolving credentials the same

@@ -45,8 +45,18 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     bridge.set_sender(ui_tx.clone());
 
     // Build agent with our confirmer
-    let (mut agent, _sys, provider, _mcp, gate, config) =
-        build_agent(cfg, continue_, Some(bridge.confirmer())).await?;
+    let startup = build_agent(cfg, continue_, Some(bridge.confirmer())).await?;
+    // `mcp_clients` must stay alive for the whole run (drop = kill the child
+    // processes), so it is bound explicitly. `skills` feeds the TUI's /skill command.
+    let crate::app::Startup {
+        mut agent,
+        resolved: provider,
+        mcp_clients: _mcp,
+        gate,
+        config,
+        skills: _skills,
+        ..
+    } = startup;
 
     // Provider profile names for the /model picker (sorted, mock last).
     let mut model_names: Vec<String> = config.providers.keys().cloned().collect();
