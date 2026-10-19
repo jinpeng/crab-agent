@@ -220,6 +220,8 @@ pub enum SlashCommand {
     PickModel,
     /// Load a skill by name: `/skill:tdd [args]`.
     Skill(String, Option<String>),
+    /// Open the interactive skill picker (`/skills`).
+    PickSkill,
     /// Unrecognized `/something`.
     Unknown(String),
 }
@@ -238,6 +240,7 @@ pub fn parse_slash(text: &str) -> Option<SlashCommand> {
         "yolo" => SlashCommand::Yolo,
         "model" | "m" => SlashCommand::Model(arg),
         "models" => SlashCommand::PickModel,
+        "skills" => SlashCommand::PickSkill,
         other if other.starts_with("skill:") => {
             let name = other["skill:".len()..].trim().to_string();
             SlashCommand::Skill(name, arg)
@@ -263,6 +266,36 @@ pub fn skill_message(skill: &crab_core::skills::Skill, args: &str) -> String {
         msg.push_str(args);
     }
     msg
+}
+
+/// The input-box line an Enter'd skill picker selection produces: `/skill:<name> `
+/// with a trailing space so the user types straight into the args.
+pub fn skill_slash_line(name: &str) -> String {
+    format!("/skill:{name} ")
+}
+
+/// Build the skill picker overlay. None when no skills are discovered.
+/// Display items are "name — description" (description truncated to 60 cells);
+/// `names` parallels the items for the Enter action.
+pub fn skill_picker(skills: &[crab_core::skills::Skill]) -> Option<Picker> {
+    if skills.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+    let items: Vec<String> = skills
+        .iter()
+        .map(|s| {
+            format!(
+                "{} — {}",
+                s.name,
+                crate::width::truncate_to_width(&s.description, 60)
+            )
+        })
+        .collect();
+    Some(Picker::Skill {
+        list: ListPicker::new(items, 0),
+        names,
+    })
 }
 
 /// Full TUI state.
@@ -832,6 +865,45 @@ mod tests {
             parse_slash("/skill:"),
             Some(SlashCommand::Skill(String::new(), None))
         );
+    }
+
+    #[test]
+    fn parse_skills_opens_picker() {
+        assert_eq!(parse_slash("/skills"), Some(SlashCommand::PickSkill));
+    }
+
+    #[test]
+    fn skill_slash_line_has_trailing_space() {
+        assert_eq!(skill_slash_line("tdd"), "/skill:tdd ");
+    }
+
+    #[test]
+    fn skill_picker_empty_when_no_skills() {
+        assert!(skill_picker(&[]).is_none());
+    }
+
+    #[test]
+    fn skill_picker_builds_display_items_and_names() {
+        let mk = |name: &str, desc: &str| crab_core::skills::Skill {
+            name: name.into(),
+            description: desc.into(),
+            dir: std::path::PathBuf::from("/x"),
+            skill_md: std::path::PathBuf::from("/x/SKILL.md"),
+        };
+        let long = "y".repeat(200);
+        let skills = vec![mk("tdd", "Test-driven development"), mk("rev", &long)];
+        let picker = skill_picker(&skills).unwrap();
+        let Picker::Skill { list, names } = picker else {
+            panic!("must be a Skill picker");
+        };
+        assert_eq!(names, vec!["tdd".to_string(), "rev".to_string()]);
+        assert_eq!(list.items[0], "tdd — Test-driven development");
+        assert!(
+            crate::width::display_width(&list.items[1]) <= "rev — ".len() + 60,
+            "long description must be truncated: {}",
+            list.items[1]
+        );
+        assert!(list.items[1].starts_with("rev — yyy"));
     }
 
     #[test]

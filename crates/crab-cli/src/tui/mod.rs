@@ -536,6 +536,12 @@ fn dispatch_slash(
                 ));
             }
         }
+        state::SlashCommand::PickSkill => match state::skill_picker(skills) {
+            Some(picker) => state.picker = Some(picker),
+            None => state.notice(
+                "no skills found (looked in ~/.agents/skills and project .agents/skills)",
+            ),
+        },
         state::SlashCommand::Unknown(name) => {
             state.notice(format!(
                 "unknown command /{name}  (try /quit, /yolo, /model <name>, /skill:<name>)"
@@ -558,10 +564,23 @@ fn handle_picker_key(
         Up | Char('k') => picker.move_up(),
         Down | Char('j') => picker.move_down(),
         Enter => {
-            if let state::Picker::Model(l) = picker {
-                if let Some(name) = l.selected_name().map(str::to_string) {
-                    state.picker = None;
-                    let _ = cmd_tx.blocking_send(UiCommand::SetModel(name));
+            let selected = picker.selected();
+            match picker {
+                state::Picker::Skill { names, .. } => {
+                    if let Some(name) = names.get(selected) {
+                        // Skill chosen: close the picker and prefill the input box
+                        // so the user types args and hits Enter (the normal /skill path).
+                        let line = state::skill_slash_line(name);
+                        state.picker = None;
+                        state.input.clear();
+                        state.input.insert_str(&line);
+                    }
+                }
+                state::Picker::Model(l) => {
+                    if let Some(name) = l.selected_name().map(str::to_string) {
+                        state.picker = None;
+                        let _ = cmd_tx.blocking_send(UiCommand::SetModel(name));
+                    }
                 }
             }
         }
