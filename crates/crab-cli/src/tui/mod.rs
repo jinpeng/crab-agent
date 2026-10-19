@@ -505,6 +505,11 @@ fn dispatch_slash(
     match sc {
         state::SlashCommand::Quit => {
             let _ = cmd_tx.blocking_send(UiCommand::Quit);
+            // The async loop breaks on Quit, but THIS loop must also end: the
+            // runtime waits for spawn_blocking tasks at shutdown, so a TUI loop
+            // left polling stdin hangs the process after /quit (the terminal
+            // looks frozen with the MCP startup line still on screen).
+            state.should_quit = true;
         }
         state::SlashCommand::Yolo => {
             let _ = cmd_tx.blocking_send(UiCommand::ToggleYolo);
@@ -649,5 +654,15 @@ mod tests {
 
         drop(tx);
         handle.await.unwrap();
+    }
+    /// /quit must end the TUI loop itself, not just the async command loop:
+    /// the runtime waits for spawn_blocking tasks at shutdown, so a TUI loop
+    /// left polling stdin would hang the process (the /quit freeze).
+    #[test]
+    fn slash_quit_sets_should_quit() {
+        let mut state = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        dispatch_slash(state::SlashCommand::Quit, &mut state, &tx, &[], &[]);
+        assert!(state.should_quit);
     }
 }
