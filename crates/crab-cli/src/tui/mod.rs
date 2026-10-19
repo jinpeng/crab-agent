@@ -544,7 +544,7 @@ fn dispatch_slash(
         },
         state::SlashCommand::Unknown(name) => {
             state.notice(format!(
-                "unknown command /{name}  (try /quit, /yolo, /model <name>, /skill:<name>)"
+                "unknown command /{name}  (try /quit, /yolo, /model <name>, /skills, /skill:<name>)"
             ));
         }
     }
