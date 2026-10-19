@@ -63,8 +63,11 @@ pub enum McpError {
 
 /// A live stdio MCP session with one server.
 ///
-/// Dropping the client kills the child process (the rmcp transport owns it), so
-/// [`shutdown`](Self::shutdown) is the polite path, not the only one.
+/// **Callers must [`shutdown`](Self::shutdown) before dropping.** Plain drop does
+/// NOT reliably kill the child process (the leak behind the "/quit leaves MCP
+/// servers running" bug): the rmcp kill runs as a spawned task that exit-time
+/// teardown can starve or never poll. `shutdown()` cancels the session while the
+/// runtime is alive, which is what actually reaps the child.
 pub struct McpClient {
     name: String,
     service: RunningService<RoleClient, ()>,
@@ -938,5 +941,110 @@ mod tests {
         // owner can still shut it down politely.
         let client = Arc::try_unwrap(client).expect("wrappers still hold the client");
         client.shutdown().await;
+    }
+
+    /// A child that survives the exit path leaks server processes (the /quit and
+    /// --print paths both drop the client without calling `shutdown`). Fixture:
+    /// a minimal MCP server that completes the handshake then idles forever,
+    /// writing its PID to $PIDFILE so the test can watch it.
+    const SLEEPER_PY: &str = r#"
+import json, os, sys, time
+with open(os.environ["PIDFILE"], "w") as f:
+    f.write(str(os.getpid()))
+
+def reply(id_, result):
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}) + "\n")
+    sys.stdout.flush()
+
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        # daemon mode: release the inherited stdout pipe (else the test harness
+        # hangs waiting for EOF) and keep living until explicitly killed
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        while True:
+            time.sleep(3600)
+        continue
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if msg.get("method") == "initialize":
+        reply(msg["id"], {"protocolVersion": "2024-11-05",
+                          "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "sleeper", "version": "0"}})
+    elif msg.get("method") == "tools/list":
+        reply(msg["id"], {"tools": []})
+"#;
+
+    fn sleeper_config(dir: &tempfile::TempDir) -> Option<(McpServerConfig, String)> {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            return None; // no python3: skip
+        }
+        let script = dir.path().join("sleeper.py");
+        std::fs::write(&script, SLEEPER_PY).unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let mut env = std::collections::HashMap::new();
+        env.insert("PIDFILE".to_string(), pidfile.to_string_lossy().into_owned());
+        let cfg = McpServerConfig {
+            command: "python3".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            enabled: Some(true),
+            env,
+        };
+        Some((cfg, pidfile.to_string_lossy().into_owned()))
+    }
+
+    fn child_pid(pidfile: &str) -> Option<String> {
+        (0..50).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::fs::read_to_string(pidfile).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        })
+    }
+
+    fn pid_alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// True once the child is gone, polling up to 5s.
+    fn pid_died(pid: &str) -> bool {
+        (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            !pid_alive(pid)
+        })
+    }
+
+    /// Regression (the /quit MCP leak): shutdown must reap the child while the
+    /// runtime is alive — every exit path is expected to call this instead of
+    /// relying on drop.
+    #[tokio::test]
+    async fn shutdown_kills_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((cfg, pidfile)) = sleeper_config(&dir) else {
+            eprintln!("python3 unavailable: skipping");
+            return;
+        };
+        let client = McpClient::spawn("sleeper", &cfg, PermissionGate::auto_approve())
+            .await
+            .expect("sleeper must spawn and handshake");
+        let pid = child_pid(&pidfile).expect("child must write its pid");
+
+        client.shutdown().await;
+
+        assert!(pid_died(&pid), "MCP child {pid} outlived shutdown");
     }
 }

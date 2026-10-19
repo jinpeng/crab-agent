@@ -103,9 +103,9 @@ pub fn latest_session(dir: &Path) -> Option<PathBuf> {
 /// Assemble a ready-to-run agent.
 ///
 /// The returned [`McpClient`]s are the live MCP children backing the MCP tools
-/// registered in the agent's registry: dropping one closes the connection and
-/// kills its process, so the caller **must** keep them alive for as long as the
-/// agent may call those tools.
+/// registered in the agent's registry. The caller **must** keep them alive for as
+/// long as the agent may call those tools, and **must** pass them to
+/// [`shutdown_mcp`] before exiting — plain drop leaks the child processes.
 ///
 /// `confirmer` is optional: if `None`, the default behavior is used
 /// (--yolo, --print, or a simple terminal confirmer). Pass `Some(confirmer)`
@@ -168,6 +168,20 @@ pub async fn build_agent(
         config,
         skills,
     })
+}
+
+/// Politely shut down every MCP server: cancel each session (which reaps its
+/// child process) while the tokio runtime is still alive. Call after dropping the
+/// agent — its tool registry holds `Arc` clones of the clients, so `Arc::try_unwrap`
+/// only succeeds once the agent is gone. A still-shared client is reported and
+/// skipped: the process is exiting anyway.
+pub async fn shutdown_mcp(clients: Vec<Arc<McpClient>>) {
+    for client in clients {
+        match Arc::try_unwrap(client) {
+            Ok(client) => client.shutdown().await,
+            Err(_) => eprintln!("[crab] mcp: client still shared at exit; child may leak"),
+        }
+    }
 }
 
 /// Build a provider for the given profile name, resolving credentials the same

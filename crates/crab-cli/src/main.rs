@@ -44,18 +44,23 @@ async fn run_print(cli: &Cli, prompt: String) -> anyhow::Result<()> {
     // outlive the run below, so it is bound here rather than dropped inside `build_agent`.
     let startup = app::build_agent(&cfg, cli.continue_, None).await?;
     let mut agent = startup.agent;
-    let _mcp = startup.mcp_clients;
+    // Holds the live MCP child processes for the whole run (see app::build_agent).
+    let mcp = startup.mcp_clients;
     let rx = agent.subscribe();
     // Render until the channel closes, not until `Finished`: the run loop and the
     // provider→agent bridge task publish to the same channel, so a text delta can
     // still be enqueued after `Finished` (and after the renderer read it).
     let render = tokio::spawn(render::render_events_until_closed(rx));
     let reason = agent.run(prompt).await;
-    // Dropping the agent drops the channel's last sender (`run` already finished and
-    // awaited its own bridge sender), which lets the renderer drain everything that
-    // was buffered and then exit. Await it on both paths — on the error path too —
-    // so the process never returns before stdout is flushed.
+    // Dropping the agent releases the registry's Arc<McpClient> clones; only then
+    // can shutdown_mcp take sole ownership and reap the MCP children while the
+    // runtime is alive.
     drop(agent);
+    app::shutdown_mcp(mcp).await;
+    // Dropping the agent also drops the channel's last sender (`run` already
+    // finished and awaited its own bridge sender), which lets the renderer drain
+    // everything that was buffered and then exit. Await it on both paths — on the
+    // error path too — so the process never returns before stdout is flushed.
     let _ = render.await;
     let reason = reason?;
     let _ = reason;

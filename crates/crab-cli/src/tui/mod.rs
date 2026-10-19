@@ -195,6 +195,11 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     // Cleanup
     forward_handle.abort();
     let _ = forward_handle.await;
+    // Reap the MCP children while the runtime is alive (plain drop leaks them —
+    // the /quit bug). The agent must go first: its tool registry holds Arc clones
+    // of every client, so shutdown_mcp can only take sole ownership afterwards.
+    drop(agent);
+    crate::app::shutdown_mcp(_mcp).await;
     Ok(())
 }
 
