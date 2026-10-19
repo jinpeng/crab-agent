@@ -10,7 +10,7 @@ use ratatui::{
     },
 };
 
-use super::state::{Picker, Theme, TuiState};
+use super::state::{Picker, Theme, TuiState, visible_window};
 
 /// Draw the full TUI.
 pub fn draw(f: &mut Frame, state: &mut TuiState) {
@@ -237,11 +237,16 @@ fn draw_picker(f: &mut Frame, state: &TuiState) {
     let area = centered_rect_abs(width, height, f.area());
     f.render_widget(Clear, area);
 
+    // Scroll the window so the selection stays visible (centered when possible).
+    let capacity = height.saturating_sub(2) as usize;
     let selected = picker.selected();
+    let offset = visible_window(selected, picker.items().len(), capacity);
     let lines: Vec<Line> = picker
         .items()
         .iter()
         .enumerate()
+        .skip(offset)
+        .take(capacity)
         .map(|(i, name)| {
             if i == selected {
                 Line::from(vec![Span::styled(

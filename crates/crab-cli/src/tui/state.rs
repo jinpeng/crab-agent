@@ -209,6 +209,17 @@ impl Picker {
     }
 }
 
+/// First visible index of a scrolling window of `capacity` items that keeps
+/// `selected` in view: centered when possible, clamped at both ends.
+pub fn visible_window(selected: usize, len: usize, capacity: usize) -> usize {
+    if len <= capacity {
+        return 0;
+    }
+    selected
+        .saturating_sub(capacity / 2)
+        .min(len - capacity)
+}
+
 /// A parsed slash command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlashCommand {
@@ -865,6 +876,22 @@ mod tests {
             parse_slash("/skill:"),
             Some(SlashCommand::Skill(String::new(), None))
         );
+    }
+
+    #[test]
+    fn visible_window_keeps_selection_in_view() {
+        // Everything fits: never scrolls.
+        assert_eq!(visible_window(0, 10, 13), 0);
+        assert_eq!(visible_window(9, 10, 13), 0);
+        // Top: stays at 0 until the selection passes the middle.
+        assert_eq!(visible_window(0, 50, 13), 0);
+        assert_eq!(visible_window(6, 50, 13), 0);
+        // Middle: follows, keeping the selection centered.
+        assert_eq!(visible_window(25, 50, 13), 19);
+        assert_eq!(visible_window(26, 50, 13), 20);
+        // Bottom: clamped so the last window still fills the capacity.
+        assert_eq!(visible_window(49, 50, 13), 37);
+        assert_eq!(visible_window(44, 50, 13), 37);
     }
 
     #[test]
