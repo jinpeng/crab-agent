@@ -51,7 +51,7 @@ pub struct McpTool { /* client: Arc<McpClient>, server, tool_name, description, 
 
 **这步纯重构**，为 MCP 工具（运行时名字）铺路。dogfood 让 crab 做。
 
-- [ ] **Step 1: 失败测试**——registry 能接受 String 名字的 tool
+- [x] **Step 1: 失败测试**——registry 能接受 String 名字的 tool
 
 ```rust
 // tool.rs tests
@@ -72,9 +72,9 @@ async fn registry_accepts_owned_string_names() {
 }
 ```
 
-- [ ] **Step 2: 跑红**——`cargo test -p crab-core tool 2>&1 | grep -E 'error|test result'`，Expected: FAIL（name() 还是 &'static str）。
+- [x] **Step 2: 跑红**——`cargo test -p crab-core tool 2>&1 | grep -E 'error|test result'`，Expected: FAIL（name() 还是 &'static str）。
 
-- [ ] **Step 3: 改 trait + 全部实现 + Registry**
+- [x] **Step 3: 改 trait + 全部实现 + Registry**
 
 ```rust
 // tool.rs
@@ -103,9 +103,9 @@ impl ToolRegistry {
 
 6 内置工具 + web_fetch + 所有 Noop 测试工具的 `fn name(&self) -> &'static str { "x" }` 改为 `fn name(&self) -> Cow<'static, str> { Cow::Borrowed("x") }`。schemas() 里 `"name": t.name()` 不变（Cow 可序列化为字符串）。
 
-- [ ] **Step 4: 跑绿全套件**——所有 `name()` 调用点（registry insert、schemas）适配。
+- [x] **Step 4: 跑绿全套件**——所有 `name()` 调用点（registry insert、schemas）适配。
 
-- [ ] **Step 5: Commit** — `git commit -m "refactor(core): Tool::name returns Cow, registry keys String (prep for MCP)"`
+- [x] **Step 5: Commit** — `git commit -m "refactor(core): Tool::name returns Cow, registry keys String (prep for MCP)"`
 
 ---
 
@@ -114,7 +114,7 @@ impl ToolRegistry {
 **Files:**
 - Modify: `crates/crab-core/src/config.rs`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```rust
 #[test]
@@ -147,11 +147,11 @@ fn no_mcp_section_is_empty() {
 }
 ```
 
-- [ ] **Step 2: 跑红** → Expected: FAIL。
+- [x] **Step 2: 跑红** → Expected: FAIL。
 
-- [ ] **Step 3: 实现**——`Config` 加 `mcp: HashMap<String, McpServerConfig>`，`McpServerConfig::is_enabled()` 返回 `self.enabled.unwrap_or(true)`。
+- [x] **Step 3: 实现**——`Config` 加 `mcp: HashMap<String, McpServerConfig>`，`McpServerConfig::is_enabled()` 返回 `self.enabled.unwrap_or(true)`。
 
-- [ ] **Step 4: 跑绿 + Commit** — `git commit -m "feat(core): config [mcp.*] server sections"`
+- [x] **Step 4: 跑绿 + Commit** — `git commit -m "feat(core): config [mcp.*] server sections"`
 
 ---
 
@@ -163,17 +163,17 @@ fn no_mcp_section_is_empty() {
 
 **这步需要 rmcp 真实 API，最容易卡。让 crab 做，但给足 rmcp 用法样例（spec 里那段）。**
 
-- [ ] **Step 1: 加依赖**
+- [x] **Step 1: 加依赖**
 
 `Cargo.toml` workspace：`rmcp = { version = "3.5", default-features = false, features = ["client", "transport-child-process"] }`；core 加 `rmcp.workspace = true`。
 
-- [ ] **Step 2: 失败测试**——用一个 in-process mock MCP server 验证 spawn/list/call
+- [x] **Step 2: 失败测试**——用一个 in-process mock MCP server 验证 spawn/list/call
 
 rmcp 测试子进程最好用真实的最小 server。用 rmcp server 端写一个 echo server 作为测试 fixture（`#[tokio::test]` 里 spawn 它）。或者更简单：写一个 shell 脚本当假 MCP server。最稳的是用 rmcp 自己起一个 in-process server。
 
 crab 实现时决定测试策略，但必须有：spawn 成功 + list_tools 返回工具 + call 返回结果 + spawn 失败容错（命令不存在时 Err 不 panic）。
 
-- [ ] **Step 3: 实现 McpClient**
+- [x] **Step 3: 实现 McpClient**
 
 ```rust
 use rmcp::{ServiceExt, transport::{TokioChildProcess, ConfigureCommandExt}, model::CallToolRequestParams};
@@ -186,7 +186,7 @@ pub async fn spawn(name: &str, cfg: &McpServerConfig, gate: PermissionGate) -> R
 }
 ```
 
-- [ ] **Step 4: 跑绿 + Commit** — `git commit -m "feat(core): McpClient spawn/list/call over stdio"`
+- [x] **Step 4: 跑绿 + Commit** — `git commit -m "feat(core): McpClient spawn/list/call over stdio"`
 
 ---
 
@@ -195,9 +195,9 @@ pub async fn spawn(name: &str, cfg: &McpServerConfig, gate: PermissionGate) -> R
 **Files:**
 - Modify: `crates/crab-core/src/mcp.rs`、`crates/crab-core/src/tools/mod.rs`（或新装配点）
 
-- [ ] **Step 1: 失败测试**——McpTool 的 name 是 `<server>__<tool>`，门禁 deny 时不调用
+- [x] **Step 1: 失败测试**——McpTool 的 name 是 `<server>__<tool>`，门禁 deny 时不调用
 
-- [ ] **Step 2: 实现 McpTool**
+- [x] **Step 2: 实现 McpTool**
 
 ```rust
 pub struct McpTool {
@@ -226,7 +226,7 @@ impl Tool for McpTool {
 
 **注意**：`Tool::description()` 也是 `&'static str`，MCP 工具描述是运行时的。要么也改 `Cow<'static, str>`（推荐，一致性），要么 leak。计划里统一改成 `Cow`。
 
-- [ ] **Step 3: 跑绿 + Commit** — `git commit -m "feat(core): McpTool wraps MCP tools as crab Tool with namespacing + gate"`
+- [x] **Step 3: 跑绿 + Commit** — `git commit -m "feat(core): McpTool wraps MCP tools as crab Tool with namespacing + gate"`
 
 ---
 
@@ -235,7 +235,7 @@ impl Tool for McpTool {
 **Files:**
 - Modify: `crates/crab-cli/src/app.rs`（build_agent 启动 enabled 的 MCP server）
 
-- [ ] **Step 1: build_agent 加 MCP 启动**
+- [x] **Step 1: build_agent 加 MCP 启动**
 
 ```rust
 // register_all 之后：
@@ -263,15 +263,15 @@ for (name, srv) in &config.mcp {
 
 `build_agent` 变 async（spawn 是 async）——调用点 main/interactive 改 `.await`。注意 eprintln 在 cli 层（app.rs 是 cli），不破 core 红线。
 
-- [ ] **Step 2: e2e 测试**——config 写一个假 MCP server（echo），`crab --print` 能列出/调用。
+- [x] **Step 2: e2e 测试**——config 写一个假 MCP server（echo），`crab --print` 能列出/调用。
 
-- [ ] **Step 3: 跑绿 + Commit** — `git commit -m "feat(cli): spawn + register enabled MCP servers at startup"`
+- [x] **Step 3: 跑绿 + Commit** — `git commit -m "feat(cli): spawn + register enabled MCP servers at startup"`
 
 ---
 
 ### Task 6: 完成标志 + 体积 + 文档
 
-- [ ] **Step 1: 全套件绿 + 红线 + release 体积**（rmcp 加了多少）
+- [x] **Step 1: 全套件绿 + 红线 + release 体积**（rmcp 加了多少）
 
 ```bash
 export https_proxy=http://127.0.0.1:10808
@@ -280,9 +280,9 @@ cargo tree -p crab-core | grep -iE 'crossterm|reedline|ratatui|clap' && echo VIO
 cargo build --release; ls -l target/release/crab | awk '{printf "%.2f MiB\n", $5/1048576}'
 ```
 
-- [ ] **Step 2: 手动 smoke**——config 配一个真 MCP server（如 filesystem），`crab --print "list files"` 看 agent 调用 MCP 工具。
+- [x] **Step 2: 手动 smoke**——config 配一个真 MCP server（如 filesystem），`crab --print "list files"` 看 agent 调用 MCP 工具。
 
-- [ ] **Step 3: 更新 spec/DESIGN + dogfood-log + Commit**
+- [x] **Step 3: 更新 spec/DESIGN + dogfood-log + Commit**
 
 ---
 

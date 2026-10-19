@@ -49,3 +49,12 @@
   2. crab 的 MCP `env` 字段正好承载这个；且 env 值不进 ps/门禁提示，适合放 API key。
 - 用到的 crab 能力: web_fetch 读配置文档、MCP env 配置（ crab 自己加的）、MCP 工具注册/调用/门禁全链路。
 - commit: f636f9d (env support)
+
+## 2026-10-16 — 输入框 CJK 光标错位 + width.rs 全面 Unicode 化
+
+- 任务: 修输入框光标错位——光标列用 `chars().count()` 算，宽字符（CJK）占 2 列却只算 1，光标偏左（'输入框' 时光标落在 入 上）；顺手把 width.rs 的 `visible_width()`/`truncate_to_width()` 全部 Unicode 化（宽字符 2 列、组合字符 0 列，截断不掉出半个宽字符）
+- 结果: 成功
+- 改动: 引入 unicode-width 依赖；新增 `display_width()` helper + 回归测试；状态栏裁剪、工具头/结果截断等所有 width.rs 消费者继承正确行为；移除了遗留 TODO。
+- commits: 10b3ea3 (CJK cursor), 5f33a34 (width.rs Unicode-aware), e106b12 (logo 重裁图，同批杂项)
+- 暴露的 crab 缺陷: 即本次修复的 TUI Unicode 宽度问题——任何人用 CJK 输入都会撞。单元测试覆盖宽/组合字符宽度与截断边界。
+- （过程细节未记录：权限确认次数 / edit 是否一次过 / 是否 crab 主导）
