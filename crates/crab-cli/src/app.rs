@@ -54,11 +54,31 @@ impl From<&crate::Cli> for AppConfig {
     }
 }
 
-pub fn build_system_prompt(cwd: &Path, extra: Option<String>) -> String {
+pub fn build_system_prompt(
+    cwd: &Path,
+    extra: Option<String>,
+    skills: &[crab_core::skills::Skill],
+) -> String {
     let mut sp = String::from(BASE_PROMPT);
     if let Ok(content) = std::fs::read_to_string(cwd.join("AGENTS.md")) {
         sp.push_str("\n\n# Project instructions (AGENTS.md)\n");
         sp.push_str(&content);
+    }
+    if !skills.is_empty() {
+        sp.push_str(
+            "\n\n# Skills\nAvailable skills. When a task matches a skill's description, \
+             read its SKILL.md at the given path with the read tool and follow it. \
+             Bundled files (references/, scripts/, assets/) are relative to the skill's directory.\n",
+        );
+        for s in skills {
+            sp.push_str(&format!(
+                "- {} — {} (at {})\n",
+                s.name,
+                s.description,
+                s.skill_md.display()
+            ));
+        }
+        sp.pop(); // 去掉末行换行，保持段落整洁
     }
     if let Some(e) = extra {
         sp.push_str("\n\n# Additional instructions\n");
@@ -98,7 +118,7 @@ pub async fn build_agent(
 ) -> Result<Startup> {
     let cwd = std::env::current_dir().context("cwd")?;
     let skills = crab_core::skills::discover(&cwd, &std::env::home_dir().unwrap_or_default());
-    let system_prompt = build_system_prompt(&cwd, cfg.system.clone());
+    let system_prompt = build_system_prompt(&cwd, cfg.system.clone(), &skills);
 
     // Loaded once: the provider resolves its credentials from it and the
     // `[mcp.*]` sections below decide which servers to start.
@@ -245,21 +265,45 @@ mod tests {
     fn system_prompt_includes_agents_md() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("AGENTS.md"), "# Rules\nAlways be terse.").unwrap();
-        let sp = build_system_prompt(dir.path(), None);
+        let sp = build_system_prompt(dir.path(), None, &[]);
         assert!(sp.contains("Always be terse"));
     }
 
     #[test]
     fn missing_agents_md_is_fine() {
         let dir = tempfile::tempdir().unwrap();
-        let sp = build_system_prompt(dir.path(), None);
+        let sp = build_system_prompt(dir.path(), None, &[]);
         assert!(!sp.is_empty());
+    }
+
+    #[test]
+    fn skills_section_present_when_skills_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = crab_core::skills::Skill {
+            name: "tdd".into(),
+            description: "Test-driven development. Use when test-first.".into(),
+            dir: dir.path().join("tdd"),
+            skill_md: dir.path().join("tdd/SKILL.md"),
+        };
+        let sp = build_system_prompt(dir.path(), None, &[skill]);
+        assert!(sp.contains("# Skills"));
+        assert!(
+            sp.contains("- tdd — Test-driven development. Use when test-first. (at ")
+        );
+        assert!(sp.contains("tdd/SKILL.md)"));
+    }
+
+    #[test]
+    fn no_skills_no_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = build_system_prompt(dir.path(), None, &[]);
+        assert!(!sp.contains("# Skills"));
     }
 
     #[test]
     fn system_flag_appended() {
         let dir = tempfile::tempdir().unwrap();
-        let sp = build_system_prompt(dir.path(), Some("extra rule".into()));
+        let sp = build_system_prompt(dir.path(), Some("extra rule".into()), &[]);
         assert!(sp.contains("extra rule"));
     }
 }
@@ -330,7 +374,7 @@ mod prompt_tests {
 
     #[test]
     fn base_prompt_teaches_freshness_gate() {
-        let sp = build_system_prompt(std::path::Path::new("/nonexistent"), None);
+        let sp = build_system_prompt(std::path::Path::new("/nonexistent"), None, &[]);
         assert!(
             sp.to_lowercase().contains("read"),
             "must mention reading before editing"
