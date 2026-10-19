@@ -4,6 +4,7 @@ pub mod gate;
 pub mod mcp;
 pub mod provider;
 pub mod session;
+pub mod skills;
 pub mod state;
 pub mod stream;
 pub mod tool;
