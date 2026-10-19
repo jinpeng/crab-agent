@@ -213,7 +213,7 @@ TLS 用 **rustls** 而非 native-tls：少一个系统依赖，静态链接更�
 
 **出局（Q21）**：
 
-skills、slash commands、prompt templates、themes、compaction、session branching / fork / clone、图片输入、`@` 文件引用、MCP client、子 agent、OAuth 登录、token 本地精确计算、OS 沙箱、JS/WASM 插件运行时。
+slash commands、prompt templates、themes、compaction、session branching / fork / clone、图片输入、`@` 文件引用、MCP client、子 agent、OAuth 登录、token 本地精确计算、OS 沙箱、JS/WASM 插件运行时。
 
 post-v0 第一项是 **MCP client**（Q7 扩展故事的落地），但要在 dogfood 过一轮、知道自己真缺什么之后再做。
 
