@@ -54,7 +54,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
         mcp_clients: _mcp,
         gate,
         config,
-        skills: _skills,
+        skills,
         ..
     } = startup;
 
@@ -125,6 +125,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
             tui_cmd_tx,
             tick_rate,
             model_names,
+            skills,
         )
     });
 
@@ -256,6 +257,7 @@ fn run_tui_loop(
     cmd_tx: tokio::sync::mpsc::Sender<UiCommand>,
     tick_rate: Duration,
     model_names: Vec<String>,
+    skills: Vec<crab_core::skills::Skill>,
 ) -> Result<()> {
     loop {
         // Draw current state
@@ -265,7 +267,7 @@ fn run_tui_loop(
         // (mouse wheel, paste) costs one redraw instead of one per event.
         let mut ready = event::poll(tick_rate)?;
         while ready {
-            if handle_event(event::read()?, &mut state, &cmd_tx, &model_names) {
+            if handle_event(event::read()?, &mut state, &cmd_tx, &model_names, &skills) {
                 return Ok(());
             }
             ready = event::poll(Duration::ZERO)?;
@@ -308,6 +310,7 @@ fn handle_event(
     state: &mut TuiState,
     cmd_tx: &tokio::sync::mpsc::Sender<UiCommand>,
     model_names: &[String],
+    skills: &[crab_core::skills::Skill],
 ) -> bool {
     match ev {
         Event::Key(key) => {
@@ -336,7 +339,7 @@ fn handle_event(
                     return true;
                 }
                 Some(Action::Slash(sc)) => {
-                    dispatch_slash(sc, state, cmd_tx, model_names);
+                    dispatch_slash(sc, state, cmd_tx, model_names, skills);
                 }
                 None => {}
             }
@@ -492,6 +495,7 @@ fn dispatch_slash(
     state: &mut TuiState,
     cmd_tx: &tokio::sync::mpsc::Sender<UiCommand>,
     model_names: &[String],
+    skills: &[crab_core::skills::Skill],
 ) {
     match sc {
         state::SlashCommand::Quit => {
@@ -513,9 +517,28 @@ fn dispatch_slash(
                 .unwrap_or(0);
             state.picker = Some(state::ModelPicker::new(model_names.to_vec(), current));
         }
+        state::SlashCommand::Skill(name, args) => {
+            if name.is_empty() {
+                state.notice("usage: /skill:<name> [args]");
+            } else if let Some(skill) = skills.iter().find(|s| s.name == name) {
+                let msg = state::skill_message(skill, args.as_deref().unwrap_or(""));
+                state.notice(format!("skill loaded: {name}"));
+                let _ = cmd_tx.blocking_send(UiCommand::Submit(msg));
+            } else {
+                let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+                state.notice(format!(
+                    "unknown skill '{name}'. Available: {}",
+                    if names.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                ));
+            }
+        }
         state::SlashCommand::Unknown(name) => {
             state.notice(format!(
-                "unknown command /{name}  (try /quit, /yolo, /model <name>)"
+                "unknown command /{name}  (try /quit, /yolo, /model <name>, /skill:<name>)"
             ));
         }
     }

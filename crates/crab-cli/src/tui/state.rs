@@ -180,6 +180,8 @@ pub enum SlashCommand {
     Model(Option<String>),
     /// Open the interactive model picker (`/models`).
     PickModel,
+    /// Load a skill by name: `/skill:tdd [args]`.
+    Skill(String, Option<String>),
     /// Unrecognized `/something`.
     Unknown(String),
 }
@@ -198,8 +200,31 @@ pub fn parse_slash(text: &str) -> Option<SlashCommand> {
         "yolo" => SlashCommand::Yolo,
         "model" | "m" => SlashCommand::Model(arg),
         "models" => SlashCommand::PickModel,
+        other if other.starts_with("skill:") => {
+            let name = other["skill:".len()..].trim().to_string();
+            SlashCommand::Skill(name, arg)
+        }
         other => SlashCommand::Unknown(other.to_string()),
     })
+}
+
+/// Build the user message that injects a skill's instructions. `args` (may be
+/// empty) is appended as the user request after the skill block.
+pub fn skill_message(skill: &crab_core::skills::Skill, args: &str) -> String {
+    let content = std::fs::read_to_string(&skill.skill_md).unwrap_or_else(|e| {
+        format!("(failed to read {}: {e})", skill.skill_md.display())
+    });
+    let mut msg = format!(
+        "<Skill instructions: {} ({})>\n{}\n</Skill instructions>",
+        skill.name,
+        skill.skill_md.display(),
+        content
+    );
+    if !args.is_empty() {
+        msg.push_str("\n\n");
+        msg.push_str(args);
+    }
+    msg
 }
 
 /// Full TUI state.
@@ -753,6 +778,41 @@ mod tests {
         assert_eq!(parse_slash(""), None);
         // Leading whitespace tolerated
         assert_eq!(parse_slash("  /yolo  "), Some(SlashCommand::Yolo));
+    }
+
+    #[test]
+    fn parse_skill_command() {
+        assert_eq!(
+            parse_slash("/skill:tdd"),
+            Some(SlashCommand::Skill("tdd".into(), None))
+        );
+        assert_eq!(
+            parse_slash("/skill:tdd fix the parser"),
+            Some(SlashCommand::Skill("tdd".into(), Some("fix the parser".into())))
+        );
+        assert_eq!(
+            parse_slash("/skill:"),
+            Some(SlashCommand::Skill(String::new(), None))
+        );
+    }
+
+    #[test]
+    fn skill_message_wraps_content_and_appends_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_md = dir.path().join("SKILL.md");
+        std::fs::write(&skill_md, "# TDD\nRed-green-refactor.").unwrap();
+        let skill = crab_core::skills::Skill {
+            name: "tdd".into(),
+            description: "d".into(),
+            dir: dir.path().to_path_buf(),
+            skill_md: skill_md.clone(),
+        };
+        let msg = skill_message(&skill, "red-green the parser");
+        assert!(msg.contains("<Skill instructions: tdd ("));
+        assert!(msg.contains(")>\n# TDD\nRed-green-refactor.\n</Skill instructions>"));
+        assert!(msg.ends_with("red-green the parser"));
+        let no_args = skill_message(&skill, "");
+        assert!(no_args.ends_with("</Skill instructions>"));
     }
 
     #[test]

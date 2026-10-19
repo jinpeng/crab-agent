@@ -34,7 +34,6 @@ pub struct AppConfig {
 /// Everything startup assembles, handed to the CLI/TUI in one piece.
 pub struct Startup {
     pub agent: Agent,
-    pub system_prompt: String,
     pub resolved: crab_core::config::ResolvedProvider,
     /// Live MCP child processes: dropping this kills them, so it must outlive the run.
     pub mcp_clients: Vec<Arc<McpClient>>,
@@ -158,12 +157,11 @@ pub async fn build_agent(
         tools,
         session,
         AgentConfig {
-            system_prompt: system_prompt.clone(),
+            system_prompt,
         },
     );
     Ok(Startup {
         agent,
-        system_prompt,
         resolved,
         mcp_clients,
         gate,
