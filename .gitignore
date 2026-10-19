@@ -28,3 +28,4 @@ rustc-ice-*.txt
 
 # crab runtime sessions
 .crab/
+.worktrees/
