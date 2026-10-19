@@ -53,6 +53,12 @@ impl InputBuffer {
         self.cursor += c.len_utf8();
     }
 
+    /// Insert a string at cursor position, leaving the cursor after it.
+    pub fn insert_str(&mut self, s: &str) {
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
     /// Delete character after cursor (Delete key).
     pub fn delete(&mut self) {
         if self.cursor < self.text.len() {
@@ -203,6 +209,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn insert_str_inserts_at_cursor() {
+        let mut b = InputBuffer::new();
+        b.insert_str("foo");
+        assert_eq!(b.text(), "foo");
+        assert_eq!(b.cursor(), 3);
+        b.move_home();
+        b.insert_str("/skill:tdd ");
+        assert_eq!(b.text(), "/skill:tdd foo");
+        assert_eq!(b.cursor(), "/skill:tdd ".len());
+    }
+
+    #[test]
     fn insert_and_backspace() {
         let mut buf = InputBuffer::new();
         buf.insert_char('a');
@@ -292,16 +310,4 @@ mod tests {
         assert_eq!(buf.cursor(), 6);
     }
 
-    // Helper trait for testing
-    trait InsertStr {
-        fn insert_str(&mut self, s: &str);
-    }
-
-    impl InsertStr for InputBuffer {
-        fn insert_str(&mut self, s: &str) {
-            for c in s.chars() {
-                self.insert_char(c);
-            }
-        }
-    }
 }

@@ -10,7 +10,7 @@ use ratatui::{
     },
 };
 
-use super::state::{Theme, TuiState};
+use super::state::{Picker, Theme, TuiState};
 
 /// Draw the full TUI.
 pub fn draw(f: &mut Frame, state: &mut TuiState) {
@@ -213,17 +213,21 @@ fn draw_confirm_modal(f: &mut Frame, state: &TuiState) {
     f.render_widget(paragraph, area);
 }
 
-/// Draw the model picker overlay.
+/// Draw the picker overlay (model profiles or skills).
 fn draw_picker(f: &mut Frame, state: &TuiState) {
     let picker = match &state.picker {
         Some(p) => p,
         None => return,
     };
+    let title = match picker {
+        Picker::Model(_) => " Select model (↑↓/jk, Enter, Esc) ",
+        Picker::Skill { .. } => " Select skill (↑↓/jk, Enter, Esc) ",
+    };
 
     // Size to content, capped.
-    let height = (picker.items.len() as u16 + 2).min(15);
+    let height = (picker.items().len() as u16 + 2).min(15);
     let width = picker
-        .items
+        .items()
         .iter()
         .map(|s| s.len())
         .max()
@@ -233,12 +237,13 @@ fn draw_picker(f: &mut Frame, state: &TuiState) {
     let area = centered_rect_abs(width, height, f.area());
     f.render_widget(Clear, area);
 
+    let selected = picker.selected();
     let lines: Vec<Line> = picker
-        .items
+        .items()
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            if i == picker.selected {
+            if i == selected {
                 Line::from(vec![Span::styled(
                     format!("> {name}"),
                     Style::default().fg(Color::Black).bg(Color::Cyan),
@@ -253,7 +258,7 @@ fn draw_picker(f: &mut Frame, state: &TuiState) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(" Select model (↑↓/jk, Enter, Esc) "),
+            .title(title),
     );
     f.render_widget(paragraph, area);
 }

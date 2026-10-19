@@ -515,7 +515,7 @@ fn dispatch_slash(
                 .iter()
                 .position(|n| state.provider_label.starts_with(n.as_str()))
                 .unwrap_or(0);
-            state.picker = Some(state::ModelPicker::new(model_names.to_vec(), current));
+            state.picker = Some(state::Picker::Model(state::ListPicker::new(model_names.to_vec(), current)));
         }
         state::SlashCommand::Skill(name, args) => {
             if name.is_empty() {
@@ -558,9 +558,11 @@ fn handle_picker_key(
         Up | Char('k') => picker.move_up(),
         Down | Char('j') => picker.move_down(),
         Enter => {
-            if let Some(name) = picker.selected_name().map(str::to_string) {
-                state.picker = None;
-                let _ = cmd_tx.blocking_send(UiCommand::SetModel(name));
+            if let state::Picker::Model(l) = picker {
+                if let Some(name) = l.selected_name().map(str::to_string) {
+                    state.picker = None;
+                    let _ = cmd_tx.blocking_send(UiCommand::SetModel(name));
+                }
             }
         }
         Esc | Char('q') => {

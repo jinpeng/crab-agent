@@ -145,14 +145,14 @@ impl ScrollState {
 
 /// Model picker overlay state (the `/model` menu).
 #[derive(Debug, Clone)]
-pub struct ModelPicker {
-    /// Available provider profile names.
+pub struct ListPicker {
+    /// Available display items.
     pub items: Vec<String>,
     /// Currently highlighted index.
     pub selected: usize,
 }
 
-impl ModelPicker {
+impl ListPicker {
     pub fn new(items: Vec<String>, current: usize) -> Self {
         let selected = current.min(items.len().saturating_sub(1));
         Self { items, selected }
@@ -168,6 +168,44 @@ impl ModelPicker {
 
     pub fn selected_name(&self) -> Option<&str> {
         self.items.get(self.selected).map(String::as_str)
+    }
+}
+
+/// The active overlay picker: model profiles, or skills to load.
+pub enum Picker {
+    Model(ListPicker),
+    /// Skill display items are "name — description" (description truncated);
+    /// `names` holds the plain names, indexed like `list`, for the Enter action.
+    Skill { list: ListPicker, names: Vec<String> },
+}
+
+impl Picker {
+    pub fn items(&self) -> &[String] {
+        match self {
+            Picker::Model(l) => &l.items,
+            Picker::Skill { list, .. } => &list.items,
+        }
+    }
+
+    pub fn selected(&self) -> usize {
+        match self {
+            Picker::Model(l) => l.selected,
+            Picker::Skill { list, .. } => list.selected,
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        match self {
+            Picker::Model(l) => l.move_up(),
+            Picker::Skill { list, .. } => list.move_up(),
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        match self {
+            Picker::Model(l) => l.move_down(),
+            Picker::Skill { list, .. } => list.move_down(),
+        }
     }
 }
 
@@ -246,7 +284,7 @@ pub struct TuiState {
     /// Should quit flag.
     pub should_quit: bool,
     /// Model picker overlay, when open.
-    pub picker: Option<ModelPicker>,
+    pub picker: Option<Picker>,
     /// Yolo (allow-all) flag, mirrored from the permission gate for the status line.
     pub yolo: bool,
     /// Current provider label for the picker (e.g. "openai/gpt-4o-mini").
@@ -818,7 +856,7 @@ mod tests {
     #[test]
     fn model_picker_navigation() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let mut p = ModelPicker::new(items, 0);
+        let mut p = ListPicker::new(items, 0);
         assert_eq!(p.selected_name(), Some("a"));
         p.move_down();
         assert_eq!(p.selected_name(), Some("b"));
@@ -832,7 +870,7 @@ mod tests {
     #[test]
     fn model_picker_selected_clamped_to_nonempty() {
         let items = vec!["only".to_string()];
-        let p = ModelPicker::new(items, 99);
+        let p = ListPicker::new(items, 99);
         assert_eq!(p.selected, 0);
         assert_eq!(p.selected_name(), Some("only"));
     }
