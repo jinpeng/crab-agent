@@ -54,9 +54,14 @@ pub fn parse_chunk(data: &str) -> Result<Vec<StreamEvent>, ProviderError> {
     if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
         let prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let completion_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        // DeepSeek-style cache accounting (hit = cache read, miss = cache write).
+        let cache_read_tokens = u["prompt_cache_hit_tokens"].as_u64().unwrap_or(0) as u32;
+        let cache_write_tokens = u["prompt_cache_miss_tokens"].as_u64().unwrap_or(0) as u32;
         out.push(StreamEvent::Usage {
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         });
     }
 
@@ -101,6 +106,40 @@ mod tests {
     }
 
     #[test]
+    fn usage_chunk_with_cache_fields_maps_four_way() {
+        let e = parse_chunk(
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_cache_hit_tokens":3,"prompt_cache_miss_tokens":2}}"#
+        )
+        .unwrap();
+        assert!(
+            e.contains(&StreamEvent::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cache_read_tokens: 3,
+                cache_write_tokens: 2,
+            }),
+            "got {e:?}"
+        );
+    }
+
+    #[test]
+    fn usage_chunk_without_cache_defaults_zero() {
+        let e = parse_chunk(
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#
+        )
+        .unwrap();
+        assert!(
+            e.contains(&StreamEvent::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            }),
+            "got {e:?}"
+        );
+    }
+
+    #[test]
     fn done_sentinel_produces_empty() {
         assert_eq!(parse_chunk("[DONE]").unwrap(), Vec::<StreamEvent>::new());
     }
@@ -135,13 +174,13 @@ mod tests {
 
     #[test]
     fn tool_call_argument_fragment() {
-        let e = parse_chunk(r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"pa"}}]},"finish_reason":null}]}"#)
+        let e = parse_chunk(r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"pa\"}"}}]},"finish_reason":null}]}"#)
             .unwrap();
         assert_eq!(
             e,
             vec![StreamEvent::ToolInputDelta {
                 index: 0,
-                json_fragment: "{\"pa".into()
+                json_fragment: "{\"pa\"}".into()
             }]
         );
     }
@@ -189,7 +228,8 @@ mod tests {
             x,
             StreamEvent::Usage {
                 prompt_tokens: 9,
-                completion_tokens: 1
+                completion_tokens: 1,
+                ..
             }
         )));
         assert!(e.iter().any(|x| matches!(
@@ -213,7 +253,7 @@ mod tests {
     fn usage_null_frame_ignored() {
         // DeepSeek intermediate chunks carry `usage: null`.
         let e = parse_chunk(
-            r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}"#,
+            "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}],\"usage\":null}",
         )
         .unwrap();
         assert_eq!(e, vec![StreamEvent::TextDelta("hi".into())]);

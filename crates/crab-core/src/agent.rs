@@ -27,6 +27,8 @@ pub enum AgentEvent {
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
     },
     AssistantMessage(Message),
     ToolCallStarted {
@@ -134,10 +136,14 @@ impl Agent {
                             crate::stream::StreamEvent::Usage {
                                 prompt_tokens,
                                 completion_tokens,
+                                cache_read_tokens,
+                                cache_write_tokens,
                             } => {
                                 let _ = events_tx2.send(AgentEvent::Usage {
                                     prompt_tokens,
                                     completion_tokens,
+                                    cache_read_tokens,
+                                    cache_write_tokens,
                                 });
                             }
                             _ => {}
@@ -498,6 +504,8 @@ mod bridge_tests {
             StreamEvent::Usage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             },
             StreamEvent::StreamEnd {
                 reason: StopReason::EndTurn,
@@ -524,6 +532,7 @@ mod bridge_tests {
                 Ok(Ok(AgentEvent::Usage {
                     prompt_tokens,
                     completion_tokens,
+                    ..
                 })) => usage = Some((prompt_tokens, completion_tokens)),
                 Ok(Ok(_)) => continue,
                 _ => break,

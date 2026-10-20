@@ -457,6 +457,7 @@ impl TuiState {
             Usage {
                 prompt_tokens,
                 completion_tokens,
+                ..
             } => {
                 self.status.add_usage(prompt_tokens, completion_tokens);
             }

@@ -49,8 +49,8 @@ pub struct AssistantTurn {
     pub message: Message,
     pub stop_reason: StopReason,
     pub interrupted: bool,
-    /// (prompt_tokens, completion_tokens) as reported by the provider, if any.
-    pub usage: Option<(u32, u32)>,
+    /// Four-way usage as reported by the provider, if any.
+    pub usage: Option<crate::obs::LlmUsage>,
 }
 
 #[cfg(test)]

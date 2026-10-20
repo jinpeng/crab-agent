@@ -20,6 +20,8 @@ pub enum StreamEvent {
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
     },
     StreamEnd {
         reason: StopReason,
@@ -39,7 +41,7 @@ pub struct StreamAccumulator {
     /// (index, slot); output sorted by index for stable ordering.
     slots: Vec<(usize, ToolSlot)>,
     stop: StopReason,
-    usage: Option<(u32, u32)>,
+    usage: Option<crate::obs::LlmUsage>,
 }
 
 impl StreamAccumulator {
@@ -77,7 +79,16 @@ impl StreamAccumulator {
             StreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
-            } => self.usage = Some((prompt_tokens, completion_tokens)),
+                cache_read_tokens,
+                cache_write_tokens,
+            } => {
+                self.usage = Some(crate::obs::LlmUsage {
+                    prompt: prompt_tokens,
+                    completion: completion_tokens,
+                    cache_read: cache_read_tokens,
+                    cache_write: cache_write_tokens,
+                })
+            }
             StreamEvent::StreamEnd { reason } => self.stop = reason,
         }
     }
@@ -275,18 +286,28 @@ mod tests {
     }
 
     #[test]
-    fn usage_event_is_captured_into_turn() {
+    fn usage_event_with_cache_is_captured_into_turn() {
         let t = run(vec![
             StreamEvent::TextDelta("hi".into()),
             StreamEvent::Usage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
+                cache_read_tokens: 3,
+                cache_write_tokens: 2,
             },
             StreamEvent::StreamEnd {
                 reason: StopReason::EndTurn,
             },
         ]);
-        assert_eq!(t.usage, Some((10, 5)));
+        assert_eq!(
+            t.usage,
+            Some(crate::obs::LlmUsage {
+                prompt: 10,
+                completion: 5,
+                cache_read: 3,
+                cache_write: 2,
+            })
+        );
         match &t.message.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "hi"),
             other => panic!("expected Text, got {other:?}"),
