@@ -4,6 +4,7 @@ mod app;
 mod render;
 mod status;
 mod theme;
+mod trace;
 mod tui;
 mod width;
 
@@ -26,11 +27,27 @@ pub struct Cli {
     /// Extra system prompt appended after base + AGENTS.md
     #[arg(long)]
     system: Option<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Render the span tree of a session file (turn -> llm/tool calls).
+    Trace {
+        file: std::path::PathBuf,
+        /// Structured JSON instead of the text tree.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(Commands::Trace { file, json }) = &cli.command {
+        return trace::run(file, *json);
+    }
     if let Some(prompt) = cli.print.clone() {
         return run_print(&cli, prompt).await;
     }

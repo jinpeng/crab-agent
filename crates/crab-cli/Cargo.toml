@@ -13,6 +13,7 @@ crab-core = { path = "../crab-core" }
 tokio.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 clap.workspace = true
