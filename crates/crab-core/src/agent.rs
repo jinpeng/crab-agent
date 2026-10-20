@@ -114,6 +114,15 @@ impl Agent {
         self.session.entries()
     }
 
+    /// Session file stem, used as the metrics row's session id.
+    pub fn session_id(&self) -> String {
+        self.session
+            .path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     pub fn last_entry_id(&self) -> Option<EntryId> {
         self.session.entries().last().map(|e| e.id())
     }

@@ -21,6 +21,8 @@ crossterm.workspace = true
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 scopeguard = "1.2.0"
 unicode-width = "0.2"
+rusqlite = { workspace = true, features = ["bundled"] }
+toml.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.2"

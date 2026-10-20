@@ -57,6 +57,8 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
         skills,
         ..
     } = startup;
+    // Best-effort metrics sink (independent broadcast receiver).
+    crate::spawn_metrics_sink(&mut agent, &provider);
 
     // Provider profile names for the /model picker (sorted, mock last).
     let mut model_names: Vec<String> = config.providers.keys().cloned().collect();
