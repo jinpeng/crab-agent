@@ -363,6 +363,40 @@ mod tests {
         }
     }
 
+    /// Draw and return every row of the frame (transcript, input box, status).
+    fn render_frame(state: &mut TuiState, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, state)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w - 1).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    /// The two status rows sit at the very bottom, below the input box:
+    /// cwd (+branch) on the first, usage left / model right on the second.
+    #[test]
+    fn status_rows_sit_below_the_input_box() {
+        let mut s = TuiState::new(
+            "deepseek/deepseek-chat".into(),
+            std::path::PathBuf::from("/x"),
+            Some(128_000),
+        );
+        s.status.add_usage(8500, 100); // makes the CH segment appear
+        let rows = render_frame(&mut s, 80, 12);
+        let cwd_row = &rows[rows.len() - 2];
+        let status_row = &rows[rows.len() - 1];
+        assert!(cwd_row.contains("/x"), "{rows:?}");
+        assert!(status_row.contains('↑'), "{rows:?}");
+        assert!(status_row.contains("CH"), "{rows:?}");
+        assert!(
+            status_row.trim_end().ends_with("deepseek/deepseek-chat"),
+            "{status_row:?}"
+        );
+        // Input box bottom border sits directly above the cwd row.
+        assert!(rows[rows.len() - 3].contains('─'), "{rows:?}");
+    }
+
     /// Draw and return the transcript rows, without the scrollbar column.
     fn render(state: &mut TuiState, w: u16, h: u16) -> Vec<String> {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
