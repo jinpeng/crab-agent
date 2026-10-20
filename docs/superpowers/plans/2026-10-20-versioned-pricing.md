@@ -15,7 +15,7 @@
 
 **Files:** Modify `crates/crab-cli/src/metrics.rs`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```rust
 #[test]
@@ -46,7 +46,7 @@ fn window_matching_includes_overnight() {
 }
 ```
 
-- [ ] **Step 2: 实现**
+- [x] **Step 2: 实现**
 
 ```rust
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 { /* Hinnant：era/yoe/mp/doy/doe，测试锁 1970-01-01=0 */ }
@@ -74,11 +74,11 @@ impl Window {
 }
 ```
 
-- [ ] **Step 3: 跑绿 + Commit** `feat(metrics): time primitives for versioned pricing (rfc3339, windows)`
+- [x] **Step 3: 跑绿 + Commit** `feat(metrics): time primitives for versioned pricing (rfc3339, windows)`
 
 ### Task 2: Pricing schema v2 + 解析/合并
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```rust
 #[test]
@@ -131,7 +131,7 @@ fn cost_resolves_by_timestamp_and_peak_valley() {
 }
 ```
 
-- [ ] **Step 2: 实现**
+- [x] **Step 2: 实现**
 
 ```rust
 pub struct Version { since: i64, base: Rates, windows: Vec<Window> }
@@ -153,18 +153,18 @@ pub fn cost_usd(p: &Pricing, model: &str, ts_ms: i64, u: &LlmUsage) -> Option<f6
 
 `load_pricing_from` 合并改为：同模型 versions 拼接后按 since 排序；**同 since**：字段非零覆盖、`windows` 用户非空则替换。
 
-- [ ] **Step 3: 跑绿 + Commit** `feat(metrics): versioned pricing with peak/valley windows`
+- [x] **Step 3: 跑绿 + Commit** `feat(metrics): versioned pricing with peak/valley windows`
 
 ### Task 3: 内置 pricing.toml 迁移 + per-Usage 成本
 
-- [ ] **Step 1: 迁移根 `crates/crab-cli/pricing.toml`** 到版本链 schema（数值不变，`since = "1970-01-01T00:00:00Z"` 占位 + 注释 `TODO: verify real effective dates`，附峰谷窗口写法示例注释）。
-- [ ] **Step 2: accumulator 改 per-Usage**：`Usage` 分支用**收到事件的 `now_ms()`** 调 `cost_usd`；`self.cost: Option<f64>` 起始 `Some(0.0)`，未定价事件置 `None`（粘性）；`usage_events` 计数；`Finished` 时 `usage_events == 0 → cost = None`。
-- [ ] **Step 3: 测试**：既有 accumulator 测试改断言（model 用内置表有的 `deepseek-chat`）；新增"部分未定价 → None"、"无 usage 事件 → None"。
-- [ ] **Step 4: 全套件 + clippy + Commit** `feat(metrics): per-usage historical costing`
+- [x] **Step 1: 迁移根 `crates/crab-cli/pricing.toml`** 到版本链 schema（数值不变，`since = "1970-01-01T00:00:00Z"` 占位 + 注释 `TODO: verify real effective dates`，附峰谷窗口写法示例注释）。
+- [x] **Step 2: accumulator 改 per-Usage**：`Usage` 分支用**收到事件的 `now_ms()`** 调 `cost_usd`；`self.cost: Option<f64>` 起始 `Some(0.0)`，未定价事件置 `None`（粘性）；`usage_events` 计数；`Finished` 时 `usage_events == 0 → cost = None`。
+- [x] **Step 3: 测试**：既有 accumulator 测试改断言（model 用内置表有的 `deepseek-chat`）；新增"部分未定价 → None"、"无 usage 事件 → None"。
+- [x] **Step 4: 全套件 + clippy + Commit** `feat(metrics): per-usage historical costing`
 
 ### Task 4: 收尾
 
-- [ ] `cargo test --workspace` 6 套件绿；`clippy -D warnings` 干净；release 体积无明显变化（纯逻辑）；e2e：临时 HOME + `~/.crab/pricing.toml` 给 mock 模型定价，跑 `--print` 后 `crab metrics` 显示非零 cost。
+- [x] `cargo test --workspace` 6 套件绿；`clippy -D warnings` 干净；release 体积无明显变化（纯逻辑）；e2e：临时 HOME + `~/.crab/pricing.toml` 给 mock 模型定价，跑 `--print` 后 `crab metrics` 显示非零 cost。
 
 ## Self-Review
 

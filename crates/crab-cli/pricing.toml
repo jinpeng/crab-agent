@@ -1,14 +1,33 @@
 # crab built-in pricing (USD per 1M tokens), embedded at compile time.
-# Update as provider prices change; unknown models simply report no cost.
-# Sources: official provider pricing pages, snapshot 2026-10.
+# Schema v2: per model a [[versions]] chain — cost resolves against the
+# version in effect AT THE CALL TIME (per-usage), with optional peak/valley
+# windows per version. The user's ~/.crab/pricing.toml overlays this table.
+#
+# IMPORTANT: `since` dates below are placeholders (epoch = "always in effect")
+# preserving the previous flat behavior. Verify real effective dates against
+# official provider announcements before trusting historical costs.
+#
+# Peak/valley example (fill in verified numbers):
+#   [[models.deepseek-chat.versions.windows]]
+#   start = "00:30"        # local time, inclusive
+#   end = "08:30"          # exclusive; start > end means overnight
+#   tz = "+08:00"
+#   input = 0.0            # off-peak rates
+#   output = 0.0
+#   cache_read = 0.0
+#   cache_write = 0.0
 
 [models.deepseek-chat]
+[[models.deepseek-chat.versions]]
+since = "1970-01-01T00:00:00Z" # TODO: verify real effective date range
 input = 0.27
 output = 1.10
 cache_read = 0.07
 cache_write = 0.07
 
 [models.deepseek-reasoner]
+[[models.deepseek-reasoner.versions]]
+since = "1970-01-01T00:00:00Z" # TODO: verify real effective date range
 input = 0.55
 output = 2.19
 cache_read = 0.14

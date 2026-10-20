@@ -18,20 +18,216 @@ pub struct Rates {
     pub cache_write: f64,
 }
 
+/// A peak/valley window within one price version: when the call's local time
+/// (per `tz_min`) falls in [start_min, end_min), the window's rates replace
+/// the version's base rates. start > end means an overnight window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Window {
+    pub start_min: i32,
+    pub end_min: i32,
+    pub tz_min: i32,
+    pub rates: Rates,
+}
+
+impl Window {
+    fn matches(&self, ts_ms: i64) -> bool {
+        let local = (((ts_ms / 60000) + self.tz_min as i64).rem_euclid(1440)) as i32;
+        if self.start_min < self.end_min {
+            local >= self.start_min && local < self.end_min
+        } else if self.start_min > self.end_min {
+            local >= self.start_min || local < self.end_min
+        } else {
+            false // an empty window never matches
+        }
+    }
+}
+
+/// One entry in a model's price history: effective from `since` (epoch ms),
+/// until the next version's `since`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Version {
+    pub since: i64,
+    pub base: Rates,
+    pub windows: Vec<Window>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pricing {
-    pub models: std::collections::HashMap<String, Rates>,
+    /// Model name → versions sorted ascending by `since`.
+    pub models: std::collections::HashMap<String, Vec<Version>>,
+}
+
+// ---- time primitives (no chrono dependency) ----
+
+/// Howard Hinnant's days_from_civil. 1970-01-01 → 0.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// RFC3339 subset `YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)` → epoch millis. None if invalid.
+fn parse_rfc3339(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 20 || b.get(4) != Some(&b'-') || b.get(7) != Some(&b'-') || b.get(10) != Some(&b'T')
+        || b.get(13) != Some(&b':') || b.get(16) != Some(&b':') {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r).and_then(|x| x.parse::<i64>().ok());
+    let y = num(0..4)?;
+    let mo = num(5..7)?;
+    let d = num(8..10)?;
+    let h = num(11..13)?;
+    let mi = num(14..16)?;
+    let sec = num(17..19)?;
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    let tz_min: i64 = match &s[19..] {
+        "Z" => 0,
+        tz if tz.len() == 6 && (tz.starts_with('+') || tz.starts_with('-')) && &tz[3..4] == ":" => {
+            let sign = if tz.starts_with('-') { -1 } else { 1 };
+            let th: i64 = tz[1..3].parse().ok()?;
+            let tm: i64 = tz[4..6].parse().ok()?;
+            if th > 23 || tm > 59 {
+                return None;
+            }
+            sign * (th * 60 + tm)
+        }
+        _ => return None,
+    };
+    let days = days_from_civil(y, mo, d);
+    Some((days * 86_400 + h * 3_600 + mi * 60 + sec - tz_min * 60) * 1000)
+}
+
+/// `+08:00` / `-05:30` / `Z` → offset minutes. None if invalid.
+fn parse_tz(s: &str) -> Option<i32> {
+    match s {
+        "Z" => Some(0),
+        _ if s.len() == 6 && (s.starts_with('+') || s.starts_with('-')) && &s[3..4] == ":" => {
+            let sign = if s.starts_with('-') { -1 } else { 1 };
+            let h: i32 = s[1..3].parse().ok()?;
+            let m: i32 = s[4..6].parse().ok()?;
+            if h > 23 || m > 59 {
+                return None;
+            }
+            Some(sign * (h * 60 + m))
+        }
+        _ => None,
+    }
+}
+
+/// `"00:30"` → minutes since local midnight. None if invalid.
+fn parse_hhmm(s: &str) -> Option<i32> {
+    let b = s.as_bytes();
+    if b.len() != 5 || b[2] != b':' {
+        return None;
+    }
+    let h: i32 = s[0..2].parse().ok()?;
+    let m: i32 = s[3..5].parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+// ---- pricing parse / merge / resolve ----
+
+/// TOML shapes we accept. We walk `toml::Value` manually (instead of untagged
+/// serde) because a fully-defaulted `Rates` would match ANY table and break
+/// shape discrimination.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct VersionToml {
+    since: Option<String>,
+    #[serde(flatten)]
+    rates: Rates,
+    windows: Vec<WindowToml>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct WindowToml {
+    start: String,
+    end: String,
+    tz: String,
+    #[serde(flatten)]
+    rates: Rates,
+}
+
+fn version_from_toml(v: &toml::Value, warn: &str) -> Option<Version> {
+    let vt: Result<VersionToml, _> = v.clone().try_into();
+    let vt = match vt {
+        Ok(vt) => vt,
+        Err(e) => {
+            eprintln!("[crab] pricing: {warn}: serde error: {e}");
+            return None;
+        }
+    };
+    let since = match &vt.since {
+        Some(s) => match parse_rfc3339(s) {
+            Some(ms) => ms,
+            None => {
+                eprintln!("[crab] pricing: {warn}: bad since {s:?}, version skipped");
+                return None;
+            }
+        },
+        None => 0, // flat legacy entry: always in effect
+    };
+    let windows = vt
+        .windows
+        .iter()
+        .filter_map(|w| {
+            let (Some(start_min), Some(end_min), Some(tz_min)) =
+                (parse_hhmm(&w.start), parse_hhmm(&w.end), parse_tz(&w.tz))
+            else {
+                eprintln!("[crab] pricing: {warn}: bad window {:?}-{:?} tz {:?}, skipped", w.start, w.end, w.tz);
+                return None;
+            };
+            Some(Window { start_min, end_min, tz_min, rates: w.rates })
+        })
+        .collect();
+    Some(Version { since, base: vt.rates, windows })
 }
 
 pub fn parse_pricing(toml_str: &str) -> Pricing {
-    #[derive(serde::Deserialize)]
-    struct File {
-        models: std::collections::HashMap<String, Rates>,
+    let mut pricing = Pricing::default();
+    // NOTE: `str::parse::<toml::Value>()` in toml 1.x parses a single VALUE,
+    // not a document — use the serde entry point for documents (as config.rs does).
+    let value = match toml::from_str::<toml::Value>(toml_str) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[crab] pricing: toml parse error: {e}");
+            return pricing;
+        }
+    };
+    let Some(models) = value.get("models").and_then(|m| m.as_table()) else {
+        eprintln!("[crab] pricing: no [models] table in {:?}", &toml_str[..toml_str.len().min(60)]);
+        return pricing;
+    };
+    for (name, model_value) in models {
+        let versions: Vec<Version> = match model_value.get("versions").and_then(|v| v.as_array()) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| version_from_toml(v, &format!("model {name}")))
+                .collect(),
+            None => match version_from_toml(model_value, &format!("model {name}")) {
+                Some(v) => vec![v],
+                None => Vec::new(),
+            },
+        };
+        if !versions.is_empty() {
+            pricing.models.insert(name.clone(), versions);
+        }
     }
-    let parsed: Option<File> = toml::from_str(toml_str).ok();
-    Pricing {
-        models: parsed.map(|f| f.models).unwrap_or_default(),
+    for versions in pricing.models.values_mut() {
+        versions.sort_by_key(|v| v.since);
     }
+    pricing
 }
 
 /// Pricing embedded at compile time (workspace root pricing.toml).
@@ -39,59 +235,69 @@ pub fn embedded_pricing() -> Pricing {
     parse_pricing(include_str!("../pricing.toml"))
 }
 
-/// Embedded defaults overlaid with the user's `~/.crab/pricing.toml`
-/// (same schema; user entries add or override models). A broken or empty
-/// user file only warns and falls back to the embedded table.
+/// Embedded defaults overlaid with the user's `~/.crab/pricing.toml`.
 pub fn load_pricing() -> Pricing {
     let user_file = std::env::home_dir().map(|h| h.join(".crab").join("pricing.toml"));
     load_pricing_from(user_file.as_deref())
 }
 
 /// The testable seam: overlay the user file (if any) on the embedded table.
+/// Version chains merge by `since`: same since → fields override when
+/// non-zero, user windows replace embedded ones when non-empty.
 fn load_pricing_from(user_file: Option<&Path>) -> Pricing {
     let mut pricing = embedded_pricing();
     let Some(path) = user_file else {
         return pricing;
     };
     let Ok(text) = std::fs::read_to_string(path) else {
-        return pricing; // no user file: embedded only
+        return pricing;
     };
     let overlay = parse_pricing(&text);
     if overlay.models.is_empty() {
-        eprintln!("[crab] pricing: {} parsed but has no [models.*] tables", path.display());
+        eprintln!("[crab] pricing: {} parsed but has no usable [models.*] tables", path.display());
     }
-    // Merge per-field: an explicit 0.0 means "not specified" (no real rate is
-    // exactly zero), so partial model entries only override what they set.
-    for (name, rates) in overlay.models {
-        pricing.models
-            .entry(name)
-            .and_modify(|r| {
-                if rates.input != 0.0 {
-                    r.input = rates.input;
+    for (name, user_versions) in overlay.models {
+        let entry = pricing.models.entry(name).or_default();
+        for uv in user_versions {
+            match entry.iter_mut().find(|e| e.since == uv.since) {
+                Some(existing) => {
+                    merge_rates(&mut existing.base, &uv.base);
+                    if !uv.windows.is_empty() {
+                        existing.windows = uv.windows;
+                    }
                 }
-                if rates.output != 0.0 {
-                    r.output = rates.output;
-                }
-                if rates.cache_read != 0.0 {
-                    r.cache_read = rates.cache_read;
-                }
-                if rates.cache_write != 0.0 {
-                    r.cache_write = rates.cache_write;
-                }
-            })
-            .or_insert(rates);
+                None => entry.push(uv),
+            }
+        }
+        entry.sort_by_key(|v| v.since);
     }
     pricing
 }
 
-/// Cost in USD for one usage, or None when the model has no rates.
-pub fn cost_usd(p: &Pricing, model: &str, u: &LlmUsage) -> Option<f64> {
-    let r = p.models.get(model)?;
+fn merge_rates(dst: &mut Rates, src: &Rates) {
+    if src.input != 0.0 { dst.input = src.input; }
+    if src.output != 0.0 { dst.output = src.output; }
+    if src.cache_read != 0.0 { dst.cache_read = src.cache_read; }
+    if src.cache_write != 0.0 { dst.cache_write = src.cache_write; }
+}
+
+/// Cost in USD for one usage AT THE CALL TIME `ts_ms`: the last version with
+/// `since <= ts_ms`, its base rates unless a peak/valley window matches.
+/// None when the model is unknown or ts predates its first version.
+pub fn cost_usd(p: &Pricing, model: &str, ts_ms: i64, u: &LlmUsage) -> Option<f64> {
+    let versions = p.models.get(model)?;
+    let v = versions.iter().rev().find(|v| v.since <= ts_ms)?;
+    let rates = v
+        .windows
+        .iter()
+        .find(|w| w.matches(ts_ms))
+        .map(|w| &w.rates)
+        .unwrap_or(&v.base);
     Some(
-        (u.prompt as f64 * r.input
-            + u.completion as f64 * r.output
-            + u.cache_read as f64 * r.cache_read
-            + u.cache_write as f64 * r.cache_write)
+        (u.prompt as f64 * rates.input
+            + u.completion as f64 * rates.output
+            + u.cache_read as f64 * rates.cache_read
+            + u.cache_write as f64 * rates.cache_write)
             / 1_000_000.0,
     )
 }
@@ -128,6 +334,9 @@ pub struct RunAccumulator {
     tool_calls: u32,
     tool_errors: u32,
     interrupted: bool,
+    /// Sum of per-call costs. Sticky None once any call is unpriced.
+    cost: Option<f64>,
+    usage_events: u32,
 }
 
 impl RunAccumulator {
@@ -143,6 +352,8 @@ impl RunAccumulator {
             tool_calls: 0,
             tool_errors: 0,
             interrupted: false,
+            cost: Some(0.0),
+            usage_events: 0,
         }
     }
 
@@ -157,6 +368,8 @@ impl RunAccumulator {
                 self.tool_calls = 0;
                 self.tool_errors = 0;
                 self.interrupted = false;
+                self.cost = Some(0.0);
+                self.usage_events = 0;
                 None
             }
             AgentEvent::Usage {
@@ -172,6 +385,19 @@ impl RunAccumulator {
                 self.usage.cache_read += cache_read_tokens;
                 self.usage.cache_write += cache_write_tokens;
                 self.llm_calls += 1;
+                self.usage_events += 1;
+                // Price each call at its own time: peak/valley windows and
+                // version changes can flip mid-turn.
+                let event_usage = LlmUsage {
+                    prompt: *prompt_tokens,
+                    completion: *completion_tokens,
+                    cache_read: *cache_read_tokens,
+                    cache_write: *cache_write_tokens,
+                };
+                match cost_usd(&self.pricing, &self.model, crab_core::util::now_ms() as i64, &event_usage) {
+                    Some(c) => self.cost = self.cost.map(|sum| sum + c),
+                    None => self.cost = None, // sticky: a turn is priced in full or not at all
+                }
                 None
             }
             AgentEvent::ToolCallFinished { is_error, .. } => {
@@ -184,7 +410,9 @@ impl RunAccumulator {
             AgentEvent::Finished { reason } => {
                 let started = self.started.take()?;
                 self.interrupted = matches!(reason, crab_core::types::StopReason::Aborted);
-                let cost = cost_usd(&self.pricing, &self.model, &self.usage);
+                // No usage frames at all -> the provider told us nothing; cost
+                // is unknown rather than zero.
+                let cost = if self.usage_events == 0 { None } else { self.cost };
                 Some(TurnRow {
                     session_id: String::new(), // filled by the sink
                     run_id: 0,                 // filled by the sink
@@ -488,36 +716,99 @@ mod tests {
     use super::*;
     use crab_core::types::StopReason;
 
+    /// Versioned fixture: deepseek-chat with an old price and a newer price
+    /// (effective 2025-09-06 16:30 +08:00) that carries a valley window
+    /// 00:30-08:30 (+08:00).
     fn pricing_fixture() -> Pricing {
         parse_pricing(
             r#"
 [models.deepseek-chat]
+[[models.deepseek-chat.versions]]
+since = "2025-09-06T16:30:00+08:00"
+input = 0.99
+output = 2.99
+[[models.deepseek-chat.versions.windows]]
+start = "00:30"
+end = "08:30"
+tz = "+08:00"
+input = 0.50
+output = 1.50
+[[models.deepseek-chat.versions]]
+since = "2024-12-01T00:00:00+08:00"
 input = 0.27
 output = 1.10
 cache_read = 0.07
 cache_write = 0.07
-
-[models.unknown-later]
-input = 1.0
 "#,
         )
     }
 
     #[test]
-    fn pricing_parse_and_cost_with_cache() {
-        let p = pricing_fixture();
-        let u = LlmUsage { prompt: 1_000_000, completion: 1_000_000, cache_read: 1_000_000, cache_write: 1_000_000 };
-        let cost = cost_usd(&p, "deepseek-chat", &u).unwrap();
-        assert!((cost - (0.27 + 1.10 + 0.07 + 0.07)).abs() < 1e-9, "{cost}");
+    fn rfc3339_parses_known_values() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2024-01-01T00:00:00Z"), Some(19_723 * 86_400_000));
+        assert_eq!(
+            parse_rfc3339("2024-01-01T00:00:00+08:00"),
+            Some(19_723 * 86_400_000 - 8 * 3_600_000)
+        );
+        assert_eq!(
+            parse_rfc3339("2024-01-01T00:00:00-05:30"),
+            Some(19_723 * 86_400_000 + 5 * 3_600_000 + 30 * 60_000)
+        );
+        assert!(parse_rfc3339("not-a-date").is_none());
+        assert!(parse_rfc3339("2024-01-01").is_none());
+        assert!(parse_rfc3339("2024-13-01T00:00:00Z").is_none());
     }
 
     #[test]
-    fn unknown_or_partial_model_costs_none() {
+    fn flat_entries_become_single_epoch_version() {
+        let p = parse_pricing("[models.x]\ninput = 1.0\noutput = 2.0\n");
+        let v = &p.models["x"];
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].since, 0);
+        assert_eq!(v[0].base.output, 2.0);
+    }
+
+    #[test]
+    fn versioned_entries_sort_and_carry_windows() {
         let p = pricing_fixture();
-        let u = LlmUsage { prompt: 100, ..Default::default() };
-        assert!(cost_usd(&p, "gpt-99", &u).is_none());
-        // rates default to 0.0 for missing fields: price is computable but cheap
-        assert!(cost_usd(&p, "unknown-later", &u).unwrap() < 0.001);
+        let v = &p.models["deepseek-chat"];
+        assert_eq!(v.len(), 2);
+        assert!(v[0].since < v[1].since, "versions sort ascending by since");
+        assert_eq!(v[1].windows.len(), 1);
+        assert_eq!(v[1].windows[0].start_min, 30);
+    }
+
+    #[test]
+    fn window_matching_includes_overnight() {
+        let mk = |start_min: i32, end_min: i32| Window {
+            start_min,
+            end_min,
+            tz_min: 8 * 60,
+            rates: Rates::default(),
+        };
+        let valley = mk(30, 8 * 60 + 30);
+        assert!(valley.matches(6 * 60 * 60_000 - 8 * 60 * 60_000)); // 06:00 +08:00
+        assert!(!valley.matches(12 * 60 * 60_000 - 8 * 60 * 60_000)); // 12:00 +08:00
+        let overnight = mk(16 * 60 + 30, 30);
+        assert!(overnight.matches(20 * 60 * 60_000 - 8 * 60 * 60_000)); // 20:00 local
+        assert!(overnight.matches(-8 * 3_600_000)); // 00:00 local (ts = UTC-8h)
+        assert!(!overnight.matches(8 * 60 * 60_000 - 8 * 60 * 60_000)); // 08:00 +08:00
+    }
+
+    #[test]
+    fn cost_resolves_by_timestamp_and_peak_valley() {
+        let p = pricing_fixture();
+        let u = LlmUsage { prompt: 1_000_000, ..Default::default() };
+        let t_old = parse_rfc3339("2025-01-01T12:00:00+08:00").unwrap();
+        let t_peak = parse_rfc3339("2025-10-01T12:00:00+08:00").unwrap();
+        let t_valley = parse_rfc3339("2025-10-01T04:00:00+08:00").unwrap();
+        assert!((cost_usd(&p, "deepseek-chat", t_old, &u).unwrap() - 0.27).abs() < 1e-9);
+        assert!((cost_usd(&p, "deepseek-chat", t_peak, &u).unwrap() - 0.99).abs() < 1e-9);
+        assert!((cost_usd(&p, "deepseek-chat", t_valley, &u).unwrap() - 0.50).abs() < 1e-9);
+        // before the first version / unknown model -> None
+        assert!(cost_usd(&p, "deepseek-chat", 0, &u).is_none());
+        assert!(cost_usd(&p, "gpt-99", t_peak, &u).is_none());
     }
 
     #[test]
@@ -580,14 +871,37 @@ output = 0.2
         )
         .unwrap();
         let p = load_pricing_from(Some(&user));
-        // override wins
-        assert_eq!(p.models["deepseek-chat"].input, 0.99);
-        // embedded output survives the partial override
-        assert_eq!(p.models["deepseek-chat"].output, 1.10);
+        // flat user entry (since=0) merges with the embedded since=0 version:
+        // user's non-zero field wins, embedded fields survive.
+        let v0 = p.models["deepseek-chat"].iter().find(|v| v.since == 0).unwrap();
+        assert_eq!(v0.base.input, 0.99);
+        assert_eq!(v0.base.output, 1.10);
         // user-only model appears
         assert!(p.models.contains_key("deepseek-flash"));
         // missing user file: embedded only
         assert_eq!(load_pricing_from(None), embedded_pricing());
+    }
+
+    #[test]
+    fn overlay_new_version_extends_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("pricing.toml");
+        std::fs::write(
+            &user,
+            r#"
+[models.deepseek-chat]
+[[models.deepseek-chat.versions]]
+since = "2026-01-01T00:00:00+08:00"
+input = 1.50
+output = 4.00
+"#,
+        )
+        .unwrap();
+        let p = load_pricing_from(Some(&user));
+        let chain = &p.models["deepseek-chat"];
+        assert_eq!(chain.len(), 2, "embedded epoch version + user future version");
+        assert!(chain[0].since < chain[1].since);
+        assert_eq!(chain[1].base.input, 1.50);
     }
 
     #[test]
@@ -618,6 +932,20 @@ output = 0.2
         assert_eq!(day_label(0), "1970-01-01");
         assert_eq!(day_label(19_723 * 86_400_000), "2024-01-01");
         assert_eq!(day_label(20_745 * 86_400_000), "2026-10-19");
+    }
+
+    #[test]
+    fn turn_without_usage_events_has_unknown_cost() {
+        let mut acc = RunAccumulator::new(
+            pricing_fixture(),
+            "deepseek".into(),
+            "deepseek-chat".into(),
+        );
+        acc.on_event(&AgentEvent::TurnStarted { turn: 0 });
+        let row = acc
+            .on_event(&AgentEvent::Finished { reason: StopReason::EndTurn })
+            .unwrap();
+        assert!(row.cost_usd.is_none(), "no usage frames -> unknown, not zero");
     }
 
     #[test]
