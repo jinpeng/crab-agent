@@ -64,13 +64,7 @@ impl Agent {
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
         // Restore conversation history from a loaded session (--continue). A freshly
         // created session has no entries → empty history. (Fixes continue amnesia.)
-        let history: Vec<Message> = session
-            .entries()
-            .iter()
-            .map(|e| match e {
-                crate::session::SessionEntry::Message { message, .. } => message.clone(),
-            })
-            .collect();
+        let history: Vec<Message> = session.messages().cloned().collect();
         Self {
             provider,
             tools,
@@ -410,7 +404,9 @@ pub(crate) mod tests {
         // Q11: no orphan tool_use — every tool_use has a paired tool_result on disk.
         let mut pending: Vec<String> = Vec::new();
         for e in agent.session_entries() {
-            let crate::session::SessionEntry::Message { message, .. } = e;
+            let crate::session::SessionEntry::Message { message, .. } = e else {
+                continue;
+            };
             for b in &message.content {
                 match b {
                     ContentBlock::ToolUse { id, .. } => pending.push(id.clone()),
