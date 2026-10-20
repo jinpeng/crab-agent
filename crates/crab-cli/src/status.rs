@@ -95,11 +95,6 @@ impl StatusLine {
         self.context_window = window;
     }
 
-    /// The configured context window, if any.
-    pub fn context_window(&self) -> Option<u64> {
-        self.context_window
-    }
-
     /// Row 1 (below the input box): ` ~/path (branch) `.
     pub fn format_cwd_row(&self, width: usize) -> String {
         let mut label = self.cwd_label();

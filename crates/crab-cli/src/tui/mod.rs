@@ -66,6 +66,28 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     // Subscribe to agent events
     let agent_rx = agent.subscribe();
 
+    // Refresh the git branch for the status line every 2s (only on change),
+    // so the cwd row follows branch switches without blocking the draw thread.
+    {
+        let ui_tx = ui_tx.clone();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        tokio::spawn(async move {
+            let mut last: Option<String> = None;
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.tick().await; // the interval's first tick fires immediately; skip it
+            loop {
+                tick.tick().await;
+                let branch = crate::status::git_branch(&cwd);
+                if branch != last {
+                    last = branch.clone();
+                    if ui_tx.send(UiEvent::BranchChanged(branch)).is_err() {
+                        break; // TUI gone
+                    }
+                }
+            }
+        });
+    }
+
     // Channel for UI commands (submit, abort, quit)
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<UiCommand>(16);
 
@@ -252,6 +274,8 @@ enum UiEvent {
     },
     YoloChanged(bool),
     ModelChanged(String),
+    /// Updated git branch for the status line (from the 2s refresher task).
+    BranchChanged(Option<String>),
 }
 
 /// Synchronous TUI event loop.
@@ -297,6 +321,7 @@ fn run_tui_loop(
                     state.status.set_provider_model(label.clone());
                     state.notice(format!("switched to {label}"));
                 }
+                UiEvent::BranchChanged(branch) => state.status.set_branch(branch),
             }
         }
 
