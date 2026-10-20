@@ -1,34 +1,122 @@
 # crab built-in pricing (USD per 1M tokens), embedded at compile time.
-# Schema v2: per model a [[versions]] chain — cost resolves against the
-# version in effect AT THE CALL TIME (per-usage), with optional peak/valley
-# windows per version. The user's ~/.crab/pricing.toml overlays this table.
+# Schema v2: per model a [[versions]] chain; cost resolves at the CALL TIME.
 #
-# IMPORTANT: `since` dates below are placeholders (epoch = "always in effect")
-# preserving the previous flat behavior. Verify real effective dates against
-# official provider announcements before trusting historical costs.
+# Conventions:
+#   - `input` prices only the UNCACHED input (prompt - cache_read), per the
+#     DeepSeek/Kimi usage convention where prompt_tokens includes cache hits.
+#   - DeepSeek-style APIs fold cache-write cost into the miss price
+#     (cache_write = 0). Kimi K3 bills cache writes separately by TTL; the
+#     default 5min tier is used (cache_write = 3.00).
+#   - Windows are peak overlays: base = off-peak, window rates = peak.
+#   - weekdays: 1 = Monday .. 7 = Sunday; omitted = every day. Chinese public
+#     holidays are NOT expressible — those days are priced as peak.
 #
-# Peak/valley example (fill in verified numbers):
-#   [[models.deepseek-chat.versions.windows]]
-#   start = "00:30"        # local time, inclusive
-#   end = "08:30"          # exclusive; start > end means overnight
-#   tz = "+08:00"
-#   input = 0.0            # off-peak rates
-#   output = 0.0
-#   cache_read = 0.0
-#   cache_write = 0.0
+# Verified 2026-10-20 against:
+#   DeepSeek  https://api-docs.deepseek.com/quick_start/pricing
+#   Kimi      https://platform.kimi.ai/docs/pricing/chat.md
+# `since` dates below = verification date; calls before it fall through to an
+# earlier version (or show '-' when there is none). Append historical versions
+# with earlier `since` values as providers adjust prices.
+
+# ---- DeepSeek (peak: Mon-Fri 01:00-04:00 & 06:00-10:00 UTC, half price off-peak) ----
+
+[models.deepseek-flash]
+[[models.deepseek-flash.versions]]
+since = "2026-10-20T00:00:00+08:00"
+input = 0.15
+output = 0.60
+cache_read = 0.003
+cache_write = 0.0
+[[models.deepseek-flash.versions.windows]]
+start = "01:00"
+end = "04:00"
+tz = "Z"
+weekdays = [1, 2, 3, 4, 5]
+input = 0.30
+output = 1.20
+cache_read = 0.006
+[[models.deepseek-flash.versions.windows]]
+start = "06:00"
+end = "10:00"
+tz = "Z"
+weekdays = [1, 2, 3, 4, 5]
+input = 0.30
+output = 1.20
+cache_read = 0.006
+
+[models.deepseek-v4-pro]
+[[models.deepseek-v4-pro.versions]]
+since = "2026-10-20T00:00:00+08:00"
+input = 0.66
+output = 1.98
+cache_read = 0.022
+cache_write = 0.0
+[[models.deepseek-v4-pro.versions.windows]]
+start = "01:00"
+end = "04:00"
+tz = "Z"
+weekdays = [1, 2, 3, 4, 5]
+input = 1.32
+output = 3.96
+cache_read = 0.044
+[[models.deepseek-v4-pro.versions.windows]]
+start = "06:00"
+end = "10:00"
+tz = "Z"
+weekdays = [1, 2, 3, 4, 5]
+input = 1.32
+output = 3.96
+cache_read = 0.044
+
+# Legacy names (retired; the API may still accept them). Prices are the
+# pre-2025-09 values, kept so old sessions approximate — TODO verify dates.
 
 [models.deepseek-chat]
 [[models.deepseek-chat.versions]]
-since = "1970-01-01T00:00:00Z" # TODO: verify real effective date range
+since = "1970-01-01T00:00:00Z"
 input = 0.27
 output = 1.10
 cache_read = 0.07
-cache_write = 0.07
+cache_write = 0.0
 
 [models.deepseek-reasoner]
 [[models.deepseek-reasoner.versions]]
-since = "1970-01-01T00:00:00Z" # TODO: verify real effective date range
+since = "1970-01-01T00:00:00Z"
 input = 0.55
 output = 2.19
 cache_read = 0.14
-cache_write = 0.14
+cache_write = 0.0
+
+# ---- Kimi (no peak/valley; cache write billed separately on K3, 5min TTL) ----
+
+[models.kimi-k3]
+[[models.kimi-k3.versions]]
+since = "2026-10-20T00:00:00+08:00"
+input = 3.00
+output = 15.00
+cache_read = 0.30
+cache_write = 3.00
+
+[models.kimi-k2.7-code]
+[[models.kimi-k2.7-code.versions]]
+since = "2026-10-20T00:00:00+08:00"
+input = 0.95
+output = 4.00
+cache_read = 0.19
+cache_write = 0.0
+
+[models.kimi-k2.7-code-highspeed]
+[[models.kimi-k2.7-code-highspeed.versions]]
+since = "2026-10-20T00:00:00+08:00"
+input = 1.90
+output = 8.00
+cache_read = 0.38
+cache_write = 0.0
+
+[models.kimi-k2.6]
+[[models.kimi-k2.6.versions]]
+since = "2026-10-20T00:00:00+08:00"
+input = 0.95
+output = 4.00
+cache_read = 0.16
+cache_write = 0.0

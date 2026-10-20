@@ -27,10 +27,20 @@ pub struct Window {
     pub end_min: i32,
     pub tz_min: i32,
     pub rates: Rates,
+    /// 1 = Monday .. 7 = Sunday. Empty = every day.
+    pub weekdays: Vec<i32>,
+}
+
+/// 1 = Monday .. 7 = Sunday (1970-01-01 was a Thursday).
+fn weekday_of(ts_ms: i64) -> i32 {
+    (ts_ms.div_euclid(86_400_000) + 3).rem_euclid(7) as i32 + 1
 }
 
 impl Window {
     fn matches(&self, ts_ms: i64) -> bool {
+        if !self.weekdays.is_empty() && !self.weekdays.contains(&weekday_of(ts_ms)) {
+            return false;
+        }
         let local = (((ts_ms / 60000) + self.tz_min as i64).rem_euclid(1440)) as i32;
         if self.start_min < self.end_min {
             local >= self.start_min && local < self.end_min
@@ -155,6 +165,8 @@ struct WindowToml {
     start: String,
     end: String,
     tz: String,
+    /// 1 = Monday .. 7 = Sunday; empty/omitted = every day.
+    weekdays: Vec<i32>,
     #[serde(flatten)]
     rates: Rates,
 }
@@ -188,7 +200,13 @@ fn version_from_toml(v: &toml::Value, warn: &str) -> Option<Version> {
                 eprintln!("[crab] pricing: {warn}: bad window {:?}-{:?} tz {:?}, skipped", w.start, w.end, w.tz);
                 return None;
             };
-            Some(Window { start_min, end_min, tz_min, rates: w.rates })
+            Some(Window {
+                start_min,
+                end_min,
+                tz_min,
+                rates: w.rates,
+                weekdays: w.weekdays.clone(),
+            })
         })
         .collect();
     Some(Version { since, base: vt.rates, windows })
@@ -293,8 +311,12 @@ pub fn cost_usd(p: &Pricing, model: &str, ts_ms: i64, u: &LlmUsage) -> Option<f6
         .find(|w| w.matches(ts_ms))
         .map(|w| &w.rates)
         .unwrap_or(&v.base);
+    // Providers report prompt_tokens INCLUSIVE of cache hits (DeepSeek/Kimi
+    // convention), so `input` prices only the uncached remainder. Providers
+    // without cache fields report 0s and this reduces to prompt * input.
+    let uncached = u.prompt.saturating_sub(u.cache_read);
     Some(
-        (u.prompt as f64 * rates.input
+        (uncached as f64 * rates.input
             + u.completion as f64 * rates.output
             + u.cache_read as f64 * rates.cache_read
             + u.cache_write as f64 * rates.cache_write)
@@ -744,6 +766,22 @@ cache_write = 0.07
     }
 
     #[test]
+    fn embedded_pricing_parses_with_peak_windows() {
+        let p = embedded_pricing();
+        let flash = &p.models["deepseek-flash"];
+        assert_eq!(flash.len(), 1);
+        assert_eq!(flash[0].windows.len(), 2, "two peak windows (01-04, 06-10 UTC)");
+        let k3 = &p.models["kimi-k3"];
+        assert!(k3[0].base.output > 0.0);
+        // resolution smoke: Tuesday 02:30 UTC is peak for flash; Saturday is not.
+        let tue_peak = parse_rfc3339("2026-10-20T02:30:00Z").unwrap();
+        let sat = parse_rfc3339("2026-10-24T02:30:00Z").unwrap();
+        let u = LlmUsage { prompt: 1_000_000, ..Default::default() };
+        assert!((cost_usd(&p, "deepseek-flash", tue_peak, &u).unwrap() - 0.30).abs() < 1e-9);
+        assert!((cost_usd(&p, "deepseek-flash", sat, &u).unwrap() - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
     fn rfc3339_parses_known_values() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2024-01-01T00:00:00Z"), Some(19_723 * 86_400_000));
@@ -786,6 +824,7 @@ cache_write = 0.07
             end_min,
             tz_min: 8 * 60,
             rates: Rates::default(),
+            weekdays: Vec::new(),
         };
         let valley = mk(30, 8 * 60 + 30);
         assert!(valley.matches(6 * 60 * 60_000 - 8 * 60 * 60_000)); // 06:00 +08:00
@@ -794,6 +833,38 @@ cache_write = 0.07
         assert!(overnight.matches(20 * 60 * 60_000 - 8 * 60 * 60_000)); // 20:00 local
         assert!(overnight.matches(-8 * 3_600_000)); // 00:00 local (ts = UTC-8h)
         assert!(!overnight.matches(8 * 60 * 60_000 - 8 * 60 * 60_000)); // 08:00 +08:00
+    }
+
+    #[test]
+    fn weekday_gating_skips_weekends() {
+        // 2026-10-20 is a Tuesday; 2026-10-24 is a Saturday.
+        let tue = parse_rfc3339("2026-10-20T02:00:00Z").unwrap();
+        let sat = parse_rfc3339("2026-10-24T02:00:00Z").unwrap();
+        assert_eq!(weekday_of(tue), 2);
+        assert_eq!(weekday_of(sat), 6);
+        let w = Window {
+            start_min: 60,
+            end_min: 180,
+            tz_min: 0,
+            rates: Rates { input: 9.0, ..Default::default() },
+            weekdays: vec![1, 2, 3, 4, 5],
+        };
+        assert!(w.matches(tue));
+        assert!(!w.matches(sat));
+    }
+
+    #[test]
+    fn input_price_applies_to_uncached_prompt_only() {
+        let p = parse_pricing("[models.x]\ninput = 1.0\ncache_read = 0.1\n");
+        let ts = parse_rfc3339("2026-10-20T00:00:00Z").unwrap();
+        // prompt 100 INCLUSIVE of 40 cache hits: uncached 60 @ 1.0 + hits 40 @ 0.1
+        let u = LlmUsage { prompt: 100, completion: 0, cache_read: 40, cache_write: 0 };
+        let cost = cost_usd(&p, "x", ts, &u).unwrap();
+        assert!((cost - (60.0 + 4.0) / 1_000_000.0).abs() < 1e-12, "{cost}");
+        // no cache fields -> plain prompt * input
+        let plain = LlmUsage { prompt: 100, ..Default::default() };
+        let cost2 = cost_usd(&p, "x", ts, &plain).unwrap();
+        assert!((cost2 - 100.0 / 1_000_000.0).abs() < 1e-12, "{cost2}");
     }
 
     #[test]
