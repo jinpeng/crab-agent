@@ -123,7 +123,7 @@ fn running_title(state: &TuiState) -> String {
     let elapsed = state.run_elapsed().unwrap_or_default();
     let frame = SPINNER[((elapsed.as_millis() / SPINNER_FRAME_MS) as usize) % SPINNER.len()];
     format!(
-        " {frame} running... {elapsed:.0}s (Ctrl-C to abort) ",
+        " {frame} running... {elapsed:.0}s (Esc to abort) ",
         elapsed = elapsed.as_secs()
     )
 }
@@ -336,7 +336,7 @@ mod tests {
         s.push_user("go"); // idle -> streaming, starts the clock
         let a = running_title(&s);
         assert!(a.contains("running..."), "{a:?}");
-        assert!(a.contains("Ctrl-C"), "{a:?}");
+        assert!(a.contains("Esc"), "{a:?}");
         assert!(SPINNER.contains(&a.chars().nth(1).unwrap()), "{a:?}");
 
         // A later moment picks a different frame (time-driven, not state-driven).

@@ -387,6 +387,7 @@ fn handle_event(
 }
 
 /// Result of handling a key in normal mode.
+#[derive(Debug, PartialEq)]
 enum Action {
     Submit(String),
     Abort,
@@ -399,14 +400,16 @@ enum Action {
 fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> Option<Action> {
     use KeyCode::*;
 
-    // Ctrl+C: abort if running, otherwise clear input
+    // Ctrl+C is deliberately unbound: many terminals map it to copy, so crab
+    // must not abort or quit on it (Esc aborts a running turn instead).
     if code == Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-        if state.is_running() {
-            return Some(Action::Abort);
-        } else {
-            state.input.clear();
-            return None;
-        }
+        return None;
+    }
+
+    // Esc aborts the running turn (the pi-style interrupt). When idle it is
+    // unbound here — pickers and the confirm modal handle their own Esc first.
+    if code == Esc && state.is_running() {
+        return Some(Action::Abort);
     }
 
     // Ctrl+D on empty input: quit
@@ -680,6 +683,43 @@ mod tests {
         drop(tx);
         handle.await.unwrap();
     }
+    #[test]
+    fn esc_aborts_a_running_turn() {
+        use crate::status::RunState;
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        s.run_state = RunState::Streaming;
+        assert_eq!(
+            handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut s),
+            Some(Action::Abort)
+        );
+    }
+
+    #[test]
+    fn esc_is_a_noop_when_idle() {
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        assert_eq!(handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut s), None);
+    }
+
+    #[test]
+    fn ctrl_c_does_nothing_running_or_idle() {
+        use crate::status::RunState;
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        // Running: must NOT abort — the key is left for the terminal's copy habit.
+        s.run_state = RunState::Streaming;
+        assert_eq!(
+            handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut s),
+            None
+        );
+        // Idle: must NOT clear the input either.
+        s.run_state = RunState::Idle;
+        s.input.insert_str("hello");
+        assert_eq!(
+            handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut s),
+            None
+        );
+        assert_eq!(s.input.text(), "hello");
+    }
+
     /// /quit must end the TUI loop itself, not just the async command loop:
     /// the runtime waits for spawn_blocking tasks at shutdown, so a TUI loop
     /// left polling stdin would hang the process (the /quit freeze).
