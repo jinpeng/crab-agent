@@ -18,14 +18,15 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),    // Transcript
-            Constraint::Length(1), // Status line
             Constraint::Length(3), // Input box
+            Constraint::Length(1), // cwd row
+            Constraint::Length(1), // status row
         ])
         .split(f.area());
 
     draw_transcript(f, state, chunks[0]);
-    draw_status(f, state, chunks[1]);
-    draw_input(f, state, chunks[2]);
+    draw_input(f, state, chunks[1]);
+    draw_status_rows(f, state, &chunks[2..]);
 
     // Draw confirm modal on top if active
     if state.confirm.is_some() {
@@ -94,12 +95,19 @@ fn draw_transcript(f: &mut Frame, state: &mut TuiState, area: Rect) {
     }
 }
 
-/// Draw the status line.
-fn draw_status(f: &mut Frame, state: &TuiState, area: Rect) {
-    let text = state.status.format(area.width as usize);
-    let line = Line::styled(text, Theme::status());
-    let paragraph = Paragraph::new(line);
-    f.render_widget(paragraph, area);
+/// Draw the two status rows below the input box (pi-style): the cwd+branch
+/// row, then the usage row (left) with the model label right-aligned.
+fn draw_status_rows(f: &mut Frame, state: &TuiState, areas: &[Rect]) {
+    let cwd = Line::styled(
+        state.status.format_cwd_row(areas[0].width as usize),
+        Theme::status(),
+    );
+    f.render_widget(Paragraph::new(cwd), areas[0]);
+    let row = Line::styled(
+        state.status.format_status_row(areas[1].width as usize),
+        Theme::status(),
+    );
+    f.render_widget(Paragraph::new(row), areas[1]);
 }
 
 /// Braille spinner frames, one per [`SPINNER_FRAME_MS`].
@@ -360,7 +368,7 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(f, state)).unwrap();
         let buf = term.backend().buffer();
-        let rows = h - 4; // status line (1) + input box (3)
+        let rows = h - 5; // input box (3) + status rows (2)
         (0..rows)
             .map(|y| (0..w - 1).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect()
@@ -410,7 +418,8 @@ mod tests {
         render(&mut s, 20, 12);
         assert!(s.scroll.last_total > 40, "total {}", s.scroll.last_total);
         s.scroll_to_top();
-        assert_eq!(s.scroll.offset, s.scroll.last_total - 8);
+        // Terminal height 12: transcript = 12 - 5 (input box 3 + 2 status rows).
+        assert_eq!(s.scroll.offset, s.scroll.last_total - 7);
         let rows = render(&mut s, 20, 12);
         assert!(rows[0].starts_with("word"), "{rows:?}");
     }

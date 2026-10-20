@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use crate::width::truncate_to_width;
+use crate::width::{truncate_to_width, visible_width};
 
 /// What the agent is doing right now.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -38,10 +38,12 @@ impl RunState {
 pub struct StatusLine {
     provider_model: String,
     state: RunState,
-    tokens_used: u64,
+    tokens_in: u64,
+    tokens_out: u64,
     context_used: Option<u64>,
     context_window: Option<u64>,
     cwd: PathBuf,
+    branch: Option<String>,
 }
 
 impl StatusLine {
@@ -53,10 +55,12 @@ impl StatusLine {
         Self {
             provider_model,
             state: RunState::Idle,
-            tokens_used: 0,
+            tokens_in: 0,
+            tokens_out: 0,
             context_used: None,
             context_window: None,
             cwd,
+            branch: None,
         }
     }
 
@@ -70,9 +74,18 @@ impl StatusLine {
         self.provider_model = provider_model;
     }
 
-    /// Replace the number of tokens used so far.
-    pub fn set_tokens_used(&mut self, tokens_used: u64) {
-        self.tokens_used = tokens_used;
+    /// Accumulate a response's token usage and refresh the context estimate.
+    pub fn add_usage(&mut self, prompt_tokens: u32, completion_tokens: u32) {
+        self.tokens_in += prompt_tokens as u64;
+        self.tokens_out += completion_tokens as u64;
+        // The last request's prompt size is the closest proxy for how much of
+        // the context window is occupied right now.
+        self.context_used = Some(prompt_tokens as u64);
+    }
+
+    /// Replace the cached git branch (refreshed by the TUI's async task).
+    pub fn set_branch(&mut self, branch: Option<String>) {
+        self.branch = branch;
     }
 
     /// Replace the context budget. Pass `None` for either value when it is
@@ -87,36 +100,43 @@ impl StatusLine {
         self.context_window
     }
 
-    /// Render the line, clipped to `width` visible columns.
-    ///
-    /// Shape (leading and trailing spaces included):
-    /// ` <provider_model> · <state> · <tokens> · ctx <used>/<window> (<pct>%) · <cwd> `.
-    /// The `ctx` segment is dropped entirely when no context usage is known.
-    pub fn format(&self, width: usize) -> String {
-        let mut parts = vec![
-            self.provider_model.clone(),
-            self.state.word().to_string(),
-            kfmt(self.tokens_used),
-        ];
-        if let Some(ctx) = self.ctx_segment() {
-            parts.push(ctx);
+    /// Row 1 (below the input box): ` ~/path (branch) `.
+    pub fn format_cwd_row(&self, width: usize) -> String {
+        let mut label = self.cwd_label();
+        if let Some(b) = &self.branch {
+            label.push_str(&format!(" ({b})"));
         }
-        parts.push(self.cwd_label());
-        let joined = parts.join(" · ");
-        truncate_to_width(&format!(" {joined} "), width)
+        truncate_to_width(&format!(" {label} "), width)
     }
 
-    /// The context segment, or `None` when nothing is known about it.
-    fn ctx_segment(&self) -> Option<String> {
-        let used = self.context_used?;
-        match self.context_window.filter(|w| *w > 0) {
-            Some(window) => {
-                // Round to nearest whole percent.
-                let pct = (used.saturating_mul(100) + window / 2) / window;
-                Some(format!("ctx {}/{} ({pct}%)", kfmt(used), kfmt(window)))
-            }
-            None => Some(format!("ctx {}", kfmt(used))),
+    /// Row 2: left `↑out ↓in CH<pct>% <state>` and right `(provider) model`,
+    /// right-aligned to `width`. When too narrow the model label is dropped
+    /// and only the left part is kept (clipped).
+    pub fn format_status_row(&self, width: usize) -> String {
+        let mut left = format!("↑{} ↓{}", kfmt(self.tokens_out), kfmt(self.tokens_in));
+        if let Some(ch) = self.ch_segment() {
+            left.push(' ');
+            left.push_str(&ch);
         }
+        left.push(' ');
+        left.push_str(self.state.word());
+
+        let right = &self.provider_model;
+        let total = visible_width(&left) + visible_width(right);
+        if total + 3 <= width {
+            // 2 edge spaces + at least 1 space between the segments.
+            let middle = width - total - 2;
+            return format!(" {left}{}{right} ", " ".repeat(middle));
+        }
+        truncate_to_width(&format!(" {left} "), width)
+    }
+
+    /// `CH<pct>%`, or None when usage or the window is unknown.
+    fn ch_segment(&self) -> Option<String> {
+        let used = self.context_used?;
+        let window = self.context_window.filter(|w| *w > 0)?;
+        let pct = (used.saturating_mul(100) + window / 2) / window;
+        Some(format!("CH{pct}%"))
     }
 
     /// The working directory, with a leading `$HOME` shortened to `~`.
@@ -149,22 +169,48 @@ fn kfmt(n: u64) -> String {
     }
 }
 
+/// `git branch --show-current` in `cwd`; None outside a git work tree, on a
+/// detached HEAD, or when git is unavailable.
+pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::width::visible_width;
 
-    fn full() -> StatusLine {
-        let home = std::env::var_os("HOME")
+    fn home() -> PathBuf {
+        std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/home/user"));
+            .unwrap_or_else(|| PathBuf::from("/home/user"))
+    }
+
+    fn full() -> StatusLine {
         StatusLine {
-            provider_model: "anthropic/claude-sonnet-4".to_string(),
+            provider_model: "deepseek/deepseek-chat".to_string(),
             state: RunState::Streaming,
-            tokens_used: 1200,
+            tokens_in: 45_600,
+            tokens_out: 12_300,
             context_used: Some(8500),
-            context_window: Some(128000),
-            cwd: home.join("projects/crab"),
+            context_window: Some(128_000),
+            cwd: home().join("projects/crab"),
+            branch: Some("main".to_string()),
         }
     }
 
@@ -177,83 +223,83 @@ mod tests {
     }
 
     #[test]
-    fn full_status_line_contains_every_segment() {
-        let line = full().format(200);
-        for needle in [
-            "anthropic/claude-sonnet-4",
-            "streaming",
-            "1.2k",
-            "8.5k/128.0k",
-            "7%",
-            "projects/crab",
-        ] {
-            assert!(line.contains(needle), "missing {needle:?} in {line:?}");
+    fn add_usage_accumulates_and_context_takes_latest_prompt() {
+        let mut s = StatusLine::new("m".into(), PathBuf::from("/"));
+        s.add_usage(100, 20);
+        s.add_usage(300, 40);
+        assert_eq!(s.tokens_in, 400);
+        assert_eq!(s.tokens_out, 60);
+        assert_eq!(s.context_used, Some(300), "context tracks the latest prompt size");
+    }
+
+    #[test]
+    fn cwd_row_shows_branch_in_parens() {
+        let row = full().format_cwd_row(200);
+        assert!(row.contains("~/projects/crab (main)"), "got {row:?}");
+        assert!(row.starts_with(' ') && row.ends_with(' '));
+    }
+
+    #[test]
+    fn cwd_row_without_branch_has_no_parens() {
+        let mut s = full();
+        s.branch = None;
+        let row = s.format_cwd_row(200);
+        assert!(row.contains("~/projects/crab"), "got {row:?}");
+        assert!(!row.contains('('), "got {row:?}");
+    }
+
+    #[test]
+    fn status_row_is_exactly_width_with_model_right_aligned() {
+        let row = full().format_status_row(80);
+        assert_eq!(visible_width(&row), 80, "got {row:?}");
+        assert!(row.contains("↑12.3k ↓45.6k"), "got {row:?}");
+        assert!(row.contains("CH7%"), "got {row:?}"); // 8500/128000 ~ 6.6% -> 7%
+        assert!(row.contains("streaming"), "got {row:?}");
+        assert!(row.trim_end().ends_with("deepseek/deepseek-chat"), "got {row:?}");
+    }
+
+    #[test]
+    fn status_row_drops_model_when_narrow() {
+        let row = full().format_status_row(24);
+        assert!(visible_width(&row) <= 24);
+        assert!(row.contains("↑12.3k"), "numbers survive longest: {row:?}");
+        assert!(!row.contains("deepseek"), "got {row:?}");
+    }
+
+    #[test]
+    fn status_row_omits_ch_without_window() {
+        let mut s = full();
+        s.context_window = None;
+        let row = s.format_status_row(80);
+        assert!(!row.contains("CH"), "got {row:?}");
+    }
+
+    #[test]
+    fn git_branch_in_repo_and_outside() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            eprintln!("git unavailable: skipping");
+            return;
         }
-        assert!(line.starts_with(' '), "no leading space: {line:?}");
-        assert!(line.ends_with(' '), "no trailing space: {line:?}");
-    }
+        let repo = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(
+            git_branch(repo.path()).is_some(),
+            "a fresh repo has an unborn branch"
+        );
 
-    #[test]
-    fn context_without_window_shows_absolute_count_and_no_percent() {
-        let mut status = full();
-        status.context_used = Some(500);
-        status.context_window = None;
-        let line = status.format(200);
-        assert!(line.contains("ctx 500"), "{line:?}");
-        assert!(!line.contains('%'), "unexpected percent: {line:?}");
-    }
-
-    #[test]
-    fn no_context_omits_the_segment_entirely() {
-        let mut status = full();
-        status.context_used = None;
-        status.context_window = None;
-        let line = status.format(200);
-        assert!(!line.contains("ctx"), "{line:?}");
-        assert!(!line.contains("·  ·"), "gap left behind: {line:?}");
-    }
-
-    #[test]
-    fn new_defaults_and_setters_are_reflected_in_format() {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/home/user"));
-        let mut status = StatusLine::new("openai/gpt-5".to_string(), home.join("work/crab"));
-
-        let line = status.format(200);
-        assert!(line.contains("openai/gpt-5"), "{line:?}");
-        assert!(line.contains("idle"), "{line:?}");
-        assert!(line.contains("· 0 ·"), "{line:?}");
-        assert!(!line.contains("ctx"), "{line:?}");
-
-        status.set_state(RunState::WaitingTool);
-        status.set_tokens_used(1200);
-        status.set_context(Some(8500), Some(128000));
-        let line = status.format(200);
-        for needle in [
-            "openai/gpt-5",
-            "tool",
-            "1.2k",
-            "ctx 8.5k/128.0k",
-            "7%",
-            "work/crab",
-        ] {
-            assert!(line.contains(needle), "missing {needle:?} in {line:?}");
-        }
-        assert!(!line.contains("idle"), "stale state in {line:?}");
-
-        status.set_state(RunState::Idle);
-        status.set_tokens_used(0);
-        status.set_context(None, None);
-        let line = status.format(200);
-        assert!(line.contains("idle"), "{line:?}");
-        assert!(line.contains("· 0 ·"), "{line:?}");
-        assert!(!line.contains("ctx"), "{line:?}");
-    }
-
-    #[test]
-    fn truncates_to_a_narrow_width() {
-        let line = full().format(40);
-        assert!(visible_width(&line) <= 40, "too wide: {line:?}");
+        let plain = tempfile::tempdir().unwrap();
+        assert!(git_branch(plain.path()).is_none());
     }
 }

@@ -458,10 +458,7 @@ impl TuiState {
                 prompt_tokens,
                 completion_tokens,
             } => {
-                let used = (prompt_tokens + completion_tokens) as u64;
-                self.status.set_tokens_used(used);
-                self.status
-                    .set_context(Some(used), self.status.context_window());
+                self.status.add_usage(prompt_tokens, completion_tokens);
             }
             AssistantMessage(msg) => {
                 // Cache tool args and mark assistant bubble as complete
