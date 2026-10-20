@@ -87,7 +87,7 @@ fn spawn_metrics_sink(
             return;
         };
         let mut acc =
-            metrics::RunAccumulator::new(metrics::embedded_pricing(), provider, model);
+            metrics::RunAccumulator::new(metrics::load_pricing(), provider, model);
         while let Ok(ev) = rx.recv().await {
             if let Some(mut row) = acc.on_event(&ev) {
                 row.session_id = session_id.clone();

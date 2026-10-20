@@ -18,7 +18,7 @@ pub struct Rates {
     pub cache_write: f64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pricing {
     pub models: std::collections::HashMap<String, Rates>,
 }
@@ -37,6 +37,51 @@ pub fn parse_pricing(toml_str: &str) -> Pricing {
 /// Pricing embedded at compile time (workspace root pricing.toml).
 pub fn embedded_pricing() -> Pricing {
     parse_pricing(include_str!("../pricing.toml"))
+}
+
+/// Embedded defaults overlaid with the user's `~/.crab/pricing.toml`
+/// (same schema; user entries add or override models). A broken or empty
+/// user file only warns and falls back to the embedded table.
+pub fn load_pricing() -> Pricing {
+    let user_file = std::env::home_dir().map(|h| h.join(".crab").join("pricing.toml"));
+    load_pricing_from(user_file.as_deref())
+}
+
+/// The testable seam: overlay the user file (if any) on the embedded table.
+fn load_pricing_from(user_file: Option<&Path>) -> Pricing {
+    let mut pricing = embedded_pricing();
+    let Some(path) = user_file else {
+        return pricing;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return pricing; // no user file: embedded only
+    };
+    let overlay = parse_pricing(&text);
+    if overlay.models.is_empty() {
+        eprintln!("[crab] pricing: {} parsed but has no [models.*] tables", path.display());
+    }
+    // Merge per-field: an explicit 0.0 means "not specified" (no real rate is
+    // exactly zero), so partial model entries only override what they set.
+    for (name, rates) in overlay.models {
+        pricing.models
+            .entry(name)
+            .and_modify(|r| {
+                if rates.input != 0.0 {
+                    r.input = rates.input;
+                }
+                if rates.output != 0.0 {
+                    r.output = rates.output;
+                }
+                if rates.cache_read != 0.0 {
+                    r.cache_read = rates.cache_read;
+                }
+                if rates.cache_write != 0.0 {
+                    r.cache_write = rates.cache_write;
+                }
+            })
+            .or_insert(rates);
+    }
+    pricing
 }
 
 /// Cost in USD for one usage, or None when the model has no rates.
@@ -234,7 +279,7 @@ impl MetricsDb {
         let since = crab_core::util::now_ms() as i64 - days as i64 * 86_400_000;
         let mut stmt = self.conn.prepare(
             "SELECT ts/86400000, COUNT(*), SUM(prompt_tokens), SUM(completion_tokens),
-                    SUM(cache_read), SUM(cache_write), SUM(cost_usd),
+                    SUM(cache_read), SUM(cache_write), SUM(cost_usd), COUNT(cost_usd),
                     SUM(tool_calls), SUM(tool_errors)
              FROM turns WHERE ts >= ?1 GROUP BY ts/86400000 ORDER BY 1",
         )?;
@@ -247,8 +292,9 @@ impl MetricsDb {
                 cache_read: r.get::<_, i64>(4).unwrap_or(0) as u64,
                 cache_write: r.get::<_, i64>(5).unwrap_or(0) as u64,
                 cost_usd: r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
-                tool_calls: r.get::<_, i64>(7).unwrap_or(0) as u64,
-                tool_errors: r.get::<_, i64>(8).unwrap_or(0) as u64,
+                priced_turns: r.get::<_, i64>(7).unwrap_or(0),
+                tool_calls: r.get::<_, i64>(8).unwrap_or(0) as u64,
+                tool_errors: r.get::<_, i64>(9).unwrap_or(0) as u64,
                 ..Default::default()
             })
         })?;
@@ -277,7 +323,7 @@ impl MetricsDb {
         let since = crab_core::util::now_ms() as i64 - days as i64 * 86_400_000;
         let mut stmt = self.conn.prepare(
             "SELECT model, COUNT(*), SUM(prompt_tokens), SUM(completion_tokens),
-                    SUM(cache_read), SUM(cache_write), SUM(cost_usd)
+                    SUM(cache_read), SUM(cache_write), SUM(cost_usd), COUNT(cost_usd)
              FROM turns WHERE ts >= ?1 GROUP BY model ORDER BY 7 DESC",
         )?;
         let rows = stmt.query_map([since], |r| {
@@ -289,6 +335,7 @@ impl MetricsDb {
                 cache_read: r.get::<_, i64>(4).unwrap_or(0) as u64,
                 cache_write: r.get::<_, i64>(5).unwrap_or(0) as u64,
                 cost_usd: r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+                priced_turns: r.get::<_, i64>(7).unwrap_or(0),
             })
         })?;
         let mut out = Vec::new();
@@ -318,6 +365,7 @@ pub struct DailyRow {
     pub cost_usd: f64,
     pub tool_calls: u64,
     pub tool_errors: u64,
+    pub priced_turns: i64,
     #[serde(skip)]
     pub dur_p50_ms: i64,
     #[serde(skip)]
@@ -333,6 +381,7 @@ pub struct ModelRow {
     pub cache_read: u64,
     pub cache_write: u64,
     pub cost_usd: f64,
+    pub priced_turns: i64,
 }
 
 fn kfmt(n: u64) -> String {
@@ -370,15 +419,20 @@ pub fn render_report(daily: &[DailyRow], models: &[ModelRow], days: u32) -> Stri
         } else {
             0.0
         };
+        let cost = if d.priced_turns == 0 {
+            "      -".to_string()
+        } else {
+            format!("${:.4}", d.cost_usd)
+        };
         out.push_str(&format!(
-            "  {}  turns {:>3}  ↑{} ↓{}  cr{} cw{}  ${:.4}  tool-err {:.0}%  p50 {}ms p90 {}ms\n",
+            "  {}  turns {:>3}  ↑{} ↓{}  cr{} cw{}  cost {:>8}  tool-err {:.0}%  p50 {}ms p90 {}ms\n",
             day_label(d.day_ms),
             d.turns,
             kfmt(d.completion_tokens),
             kfmt(d.prompt_tokens),
             kfmt(d.cache_read),
             kfmt(d.cache_write),
-            d.cost_usd,
+            cost,
             err_rate,
             d.dur_p50_ms,
             d.dur_p90_ms,
@@ -389,13 +443,18 @@ pub fn render_report(daily: &[DailyRow], models: &[ModelRow], days: u32) -> Stri
         out.push_str("  (no turns recorded)\n");
     }
     for m in models {
+        let cost = if m.priced_turns == 0 {
+            "      -".to_string()
+        } else {
+            format!("${:.4}", m.cost_usd)
+        };
         out.push_str(&format!(
-            "  {:<28} turns {:>3}  ↑{} ↓{}  ${:.4}\n",
+            "  {:<28} turns {:>3}  ↑{} ↓{}  cost {:>8}\n",
             m.model,
             m.turns,
             kfmt(m.completion_tokens),
             kfmt(m.prompt_tokens),
-            m.cost_usd,
+            cost,
         ));
     }
     out
@@ -502,6 +561,56 @@ input = 1.0
         assert_eq!(row.prompt_tokens, 200);
         assert!(row.cost_usd.unwrap() > 0.0);
         assert!(!row.interrupted);
+    }
+
+    #[test]
+    fn user_pricing_file_overlays_embedded_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("pricing.toml");
+        std::fs::write(
+            &user,
+            r#"
+[models.deepseek-chat]
+input = 0.99
+
+[models.deepseek-flash]
+input = 0.1
+output = 0.2
+"#,
+        )
+        .unwrap();
+        let p = load_pricing_from(Some(&user));
+        // override wins
+        assert_eq!(p.models["deepseek-chat"].input, 0.99);
+        // embedded output survives the partial override
+        assert_eq!(p.models["deepseek-chat"].output, 1.10);
+        // user-only model appears
+        assert!(p.models.contains_key("deepseek-flash"));
+        // missing user file: embedded only
+        assert_eq!(load_pricing_from(None), embedded_pricing());
+    }
+
+    #[test]
+    fn unpriced_models_render_dash_not_zero() {
+        let daily = vec![DailyRow {
+            day_ms: 19_723 * 86_400_000,
+            turns: 2,
+            priced_turns: 0,
+            ..Default::default()
+        }];
+        let models = vec![ModelRow {
+            model: "deepseek-flash".into(),
+            turns: 2,
+            priced_turns: 0,
+            prompt_tokens: 10_000,
+            completion_tokens: 1_000,
+            cache_read: 0,
+            cache_write: 0,
+            cost_usd: 0.0,
+        }];
+        let out = render_report(&daily, &models, 7);
+        assert!(out.contains("cost        -"), "{out}");
+        assert!(!out.contains("$0.0000"), "{out}");
     }
 
     #[test]
