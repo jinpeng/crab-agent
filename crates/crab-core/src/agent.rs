@@ -54,6 +54,7 @@ pub struct Agent {
     abort: tokio_util::sync::CancellationToken,
     events_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     provider_calls: Vec<Vec<Message>>,
+    next_run_id: u64,
 }
 
 impl Agent {
@@ -76,6 +77,7 @@ impl Agent {
             abort: tokio_util::sync::CancellationToken::new(),
             events_tx,
             provider_calls: Vec::new(),
+            next_run_id: 0,
         }
     }
 
@@ -155,7 +157,9 @@ impl Agent {
                 }
             }
         });
-        let result = self.run_inner(user_input, &stream_tx).await;
+        let run_id = self.next_run_id;
+        self.next_run_id += 1;
+        let result = self.run_inner(user_input, run_id, &stream_tx).await;
         // Ensure all deltas forwarded before returning, then stop the task.
         drop(stream_tx);
         forward.abort();
@@ -171,6 +175,50 @@ impl Agent {
     async fn run_inner(
         &mut self,
         user_input: String,
+        run_id: u64,
+        stream_tx: &tokio::sync::broadcast::Sender<crate::stream::StreamEvent>,
+    ) -> Result<StopReason, AgentError> {
+        let mut llm_calls = 0u32;
+        let mut tool_calls = 0u32;
+        self.obs(run_id, crate::obs::ObsBody::TurnStart);
+        let result = self
+            .loop_steps(user_input, run_id, &mut llm_calls, &mut tool_calls, stream_tx)
+            .await;
+        let (stop_reason, interrupted) = match &result {
+            Ok(r) => (*r, matches!(r, StopReason::Aborted)),
+            // Provider/IO error: the turn is over and incomplete.
+            Err(_) => (StopReason::Aborted, true),
+        };
+        self.obs(
+            run_id,
+            crate::obs::ObsBody::TurnEnd {
+                stop_reason,
+                interrupted,
+                llm_calls,
+                tool_calls,
+            },
+        );
+        result
+    }
+
+    /// Append an observability event. Failure only warns: 观测不改变系统.
+    fn obs(&mut self, run_id: u64, body: crate::obs::ObsBody) {
+        let event = crate::obs::ObsEvent {
+            run_id,
+            ts: crate::util::now_ms(),
+            body,
+        };
+        if let Err(e) = self.session.append_obs(event) {
+            eprintln!("[crab] obs append failed: {e}");
+        }
+    }
+
+    async fn loop_steps(
+        &mut self,
+        user_input: String,
+        run_id: u64,
+        llm_calls: &mut u32,
+        tool_calls: &mut u32,
         stream_tx: &tokio::sync::broadcast::Sender<crate::stream::StreamEvent>,
     ) -> Result<StopReason, AgentError> {
         let user = Message {
@@ -212,6 +260,7 @@ impl Agent {
             };
             // Record what we actually send (includes the injected system message).
             *self.provider_calls.last_mut().unwrap() = request_msgs.clone();
+            let call_started = std::time::Instant::now();
             let t = tokio::select! {
                 res = self.provider.complete(&request_msgs, &tool_schemas, Some(stream_tx)) => res?,
                 _ = self.abort.cancelled() => {
@@ -219,6 +268,17 @@ impl Agent {
                     return Ok(StopReason::Aborted);
                 }
             };
+            *llm_calls += 1;
+            self.obs(
+                run_id,
+                crate::obs::ObsBody::LlmCall {
+                    provider: self.provider.label().to_string(),
+                    model: self.provider.model().to_string(),
+                    duration_ms: call_started.elapsed().as_millis() as u64,
+                    usage: t.usage,
+                    outcome: crate::obs::ObsOutcome::Ok,
+                },
+            );
             let msg = t.message.clone();
             let _ = self
                 .events_tx
@@ -240,10 +300,30 @@ impl Agent {
                         id: id.clone(),
                         name: name.clone(),
                     });
+                    let tool_started = std::time::Instant::now();
+                    let bytes_in = input.to_string().len() as u64;
                     let (content, is_error) = match self.tools.execute(name, input.clone()).await {
                         Ok(r) => (r, false),
                         Err(e) => (e.to_string(), true),
                     };
+                    self.obs(
+                        run_id,
+                        crate::obs::ObsBody::ToolCall {
+                            tool: name.clone(),
+                            call_seq: *tool_calls,
+                            args_digest: crate::obs::digest(input),
+                            result_digest: crate::obs::digest(&serde_json::Value::String(content.clone())),
+                            bytes_in,
+                            bytes_out: content.len() as u64,
+                            duration_ms: tool_started.elapsed().as_millis() as u64,
+                            outcome: if is_error {
+                                crate::obs::ObsOutcome::Error(content.chars().take(128).collect())
+                            } else {
+                                crate::obs::ObsOutcome::Ok
+                            },
+                        },
+                    );
+                    *tool_calls += 1;
                     let _ = self.events_tx.send(AgentEvent::ToolCallFinished {
                         id: id.clone(),
                         result: content.clone(),
@@ -276,10 +356,10 @@ impl Agent {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::provider::MockProvider;
+    use crate::provider::{MockProvider, ProviderError};
     use crate::stream::StreamEvent;
     use crate::tool::{Tool, ToolError, ToolRegistry};
-    use crate::types::{ContentBlock, StopReason};
+    use crate::types::{AssistantTurn, ContentBlock, StopReason};
     use async_trait::async_trait;
 
     pub(crate) struct Noop;
@@ -354,6 +434,146 @@ pub(crate) mod tests {
             })
         });
         assert!(has_tool_result, "tool result must be fed back to model");
+    }
+
+    fn obs_bodies(agent: &Agent) -> Vec<(u64, crate::obs::ObsBody)> {
+        agent
+            .session_entries()
+            .iter()
+            .filter_map(|e| match e {
+                crate::session::SessionEntry::Obs { event, .. } => {
+                    Some((event.run_id, event.body.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn run_writes_obs_turn_llm_tool_events() {
+        let provider = MockProvider::new(vec![
+            tool_turn(),
+            vec![
+                StreamEvent::TextDelta("all done".into()),
+                StreamEvent::Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    cache_read_tokens: 2,
+                    cache_write_tokens: 1,
+                },
+                StreamEvent::StreamEnd {
+                    reason: StopReason::EndTurn,
+                },
+            ],
+        ]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(provider), tools, session, AgentConfig::default());
+
+        let reason = agent.run("hi".into()).await.unwrap();
+        assert_eq!(reason, StopReason::EndTurn);
+
+        let bodies = obs_bodies(&agent);
+        assert!(
+            matches!(&bodies[0], (0, crate::obs::ObsBody::TurnStart)),
+            "got {bodies:?}"
+        );
+        assert!(
+            matches!(&bodies[1], (0, crate::obs::ObsBody::LlmCall { provider, model, usage: None, outcome: crate::obs::ObsOutcome::Ok, .. }) if provider == "mock" && model == "mock"),
+            "got {bodies:?}"
+        );
+        match &bodies[2] {
+            (0, crate::obs::ObsBody::ToolCall { tool, call_seq, bytes_out, outcome, .. }) => {
+                assert_eq!(tool, "noop");
+                assert_eq!(*call_seq, 0);
+                assert_eq!(*bytes_out, 4); // "done"
+                assert_eq!(*outcome, crate::obs::ObsOutcome::Ok);
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                &bodies[3],
+                (0, crate::obs::ObsBody::LlmCall { usage: Some(u), .. })
+                if *u == crate::obs::LlmUsage { prompt: 10, completion: 5, cache_read: 2, cache_write: 1 }
+            ),
+            "got {bodies:?}"
+        );
+        match &bodies[4] {
+            (0, crate::obs::ObsBody::TurnEnd { stop_reason, interrupted, llm_calls, tool_calls }) => {
+                assert_eq!(*stop_reason, StopReason::EndTurn);
+                assert!(!interrupted);
+                assert_eq!(*llm_calls, 2);
+                assert_eq!(*tool_calls, 1);
+            }
+            other => panic!("expected TurnEnd, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn aborted_run_writes_interrupted_turn_end() {
+        let provider = MockProvider::cooperative(vec![vec![
+            StreamEvent::TextDelta("slow".into()),
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
+        ]]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(provider), tools, session, AgentConfig::default());
+        agent.abort_token().cancel();
+        let reason = agent.run("hi".into()).await.unwrap();
+        assert_eq!(reason, StopReason::Aborted);
+        let bodies = obs_bodies(&agent);
+        assert!(
+            bodies.iter().any(
+                |(_, b)| matches!(b, crate::obs::ObsBody::TurnEnd { interrupted: true, .. })
+            ),
+            "got {bodies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_error_still_writes_turn_end() {
+        struct Fail;
+        #[async_trait]
+        impl Provider for Fail {
+            async fn complete(
+                &self,
+                _m: &[Message],
+                _t: &[serde_json::Value],
+                _e: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
+            ) -> Result<AssistantTurn, ProviderError> {
+                Err(ProviderError::Network("boom".into()))
+            }
+            fn label(&self) -> &str {
+                "fail"
+            }
+            fn model(&self) -> &str {
+                "fail"
+            }
+        }
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(Fail), tools, session, AgentConfig::default());
+        assert!(agent.run("hi".into()).await.is_err());
+        let bodies = obs_bodies(&agent);
+        assert!(
+            matches!(&bodies[0], (0, crate::obs::ObsBody::TurnStart)),
+            "got {bodies:?}"
+        );
+        assert!(
+            bodies.iter().any(
+                |(_, b)| matches!(b, crate::obs::ObsBody::TurnEnd { interrupted: true, .. })
+            ),
+            "got {bodies:?}"
+        );
     }
 
     #[tokio::test]

@@ -33,6 +33,12 @@ pub trait Provider: Send + Sync {
         tools: &[serde_json::Value],
         on_event: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
     ) -> Result<AssistantTurn, ProviderError>;
+
+    /// Short provider label for observability (e.g. "openai-compatible", "mock").
+    fn label(&self) -> &str;
+
+    /// The model this provider routes to (for obs/metrics; unknown → empty).
+    fn model(&self) -> &str;
 }
 
 /// Test provider: each `complete` pops the next scripted event sequence.
@@ -99,6 +105,14 @@ impl Provider for MockProvider {
             }
         }
         Ok(acc.finish())
+    }
+
+    fn label(&self) -> &str {
+        "mock"
+    }
+
+    fn model(&self) -> &str {
+        "mock"
     }
 }
 

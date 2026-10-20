@@ -141,6 +141,20 @@ impl Provider for OpenAiProvider {
             }
         }
     }
+
+    fn label(&self) -> &str {
+        OpenAiProvider::provider_label()
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+impl OpenAiProvider {
+    fn provider_label() -> &'static str {
+        "openai-compatible"
+    }
 }
 
 fn backoff(attempt: u32) -> std::time::Duration {
