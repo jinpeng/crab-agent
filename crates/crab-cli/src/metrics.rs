@@ -271,8 +271,10 @@ fn load_pricing_from(user_file: Option<&Path>) -> Pricing {
         return pricing;
     };
     let overlay = parse_pricing(&text);
-    if overlay.models.is_empty() {
-        eprintln!("[crab] pricing: {} parsed but has no usable [models.*] tables", path.display());
+    if overlay.models.is_empty() && text.contains("[models") {
+        // A comments-only file is a valid "no overrides" choice; warn only
+        // when the user clearly tried to declare models but none parsed.
+        eprintln!("[crab] pricing: {} has [models] but none parsed (bad since/window syntax?)", path.display());
     }
     for (name, user_versions) in overlay.models {
         let entry = pricing.models.entry(name).or_default();
