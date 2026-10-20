@@ -82,16 +82,29 @@ fn messages_to_openai(m: &Message) -> Vec<serde_json::Value> {
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
-                ..
+                is_error,
             } => {
-                out.push(serde_json::json!({
-                    "role": "tool", "tool_call_id": tool_use_id, "content": content
-                }));
+                if role == "assistant" {
+                    // A ToolResult inside an ASSISTANT message (malformed tool
+                    // args, synthesized earlier as a retry hint) must never
+                    // become a bare role:"tool" message — the protocol requires
+                    // tool messages to answer a preceding assistant tool_calls.
+                    // Render it as assistant text so the model still sees the
+                    // failure and can retry.
+                    text.push_str(&format!(
+                        "\n[tool call {tool_use_id}{}]: {content}",
+                        if *is_error { " failed" } else { " returned" }
+                    ));
+                } else {
+                    out.push(serde_json::json!({
+                        "role": "tool", "tool_call_id": tool_use_id, "content": content
+                    }));
+                }
             }
         }
     }
 
-    if !text.is_empty() || !tool_calls.is_empty() || out.is_empty() {
+    if !text.is_empty() || !tool_calls.is_empty() || (out.is_empty() && !m.content.is_empty()) {
         let mut msg = serde_json::json!({ "role": role });
         if !text.is_empty() {
             msg["content"] = serde_json::Value::String(text);
@@ -105,6 +118,13 @@ fn messages_to_openai(m: &Message) -> Vec<serde_json::Value> {
         out.insert(0, msg);
     }
     out
+}
+
+/// Test seam: messages_to_openai is module-private but the protocol
+/// guarantees it provides are agent-level invariants.
+#[cfg(test)]
+pub(crate) fn messages_to_openai_for_test(m: &crate::types::Message) -> Vec<serde_json::Value> {
+    messages_to_openai(m)
 }
 
 #[async_trait]
@@ -234,6 +254,36 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::Text { text: t.into() }],
         }
+    }
+
+    #[test]
+    fn assistant_tool_result_renders_as_text_not_naked_tool_role() {
+        // Malformed tool args produce a ToolResult INSIDE the assistant message
+        // (StreamAccumulator's retry hint). Mapping that to a bare role:"tool"
+        // message breaks the OpenAI/DeepSeek protocol on the next request:
+        // "Messages with role 'tool' must be a response to a preceding message
+        // with 'tool_calls'".
+        let m = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".into(),
+                content: "invalid tool arguments JSON".into(),
+                is_error: true,
+            }],
+        };
+        let out = messages_to_openai(&m);
+        assert_eq!(out.len(), 1, "one assistant message, no naked role:tool: {out:?}");
+        assert_eq!(out[0]["role"], "assistant");
+        assert!(
+            out[0]["content"].as_str().unwrap().contains("invalid tool arguments"),
+            "error detail preserved for the model to retry: {out:?}"
+        );
+    }
+
+    #[test]
+    fn empty_user_message_is_dropped() {
+        let m = Message { role: Role::User, content: vec![] };
+        assert!(messages_to_openai(&m).is_empty(), "empty messages add noise");
     }
 
     #[tokio::test]

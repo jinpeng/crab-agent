@@ -296,6 +296,34 @@ impl Agent {
             self.history.push(msg.clone());
 
             if t.stop_reason != StopReason::ToolUse {
+                // Turn ended mid-tool-use (error / length limit) after the
+                // assistant message was recorded: answer every dangling
+                // tool_call with a synthesized error result. Otherwise the
+                // NEXT request violates the wire protocol (tool_calls must be
+                // followed by tool messages) and the provider 400s.
+                let dangling: Vec<ContentBlock> = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, .. } => Some(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: format!(
+                                "error: the model turn ended ({:?}) before this tool call completed; no result was produced",
+                                t.stop_reason
+                            ),
+                            is_error: true,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                if !dangling.is_empty() {
+                    let m = Message {
+                        role: Role::User,
+                        content: dangling,
+                    };
+                    self.record(m.clone())?;
+                    self.history.push(m);
+                }
                 let _ = self.events_tx.send(AgentEvent::Finished {
                     reason: t.stop_reason,
                 });
@@ -405,6 +433,17 @@ pub(crate) mod tests {
                 reason: StopReason::ToolUse,
             },
         ]
+    }
+
+    /// A tool_use round whose stream then dies with an error stop.
+    pub(crate) fn tool_turn_errored() -> Vec<StreamEvent> {
+        let mut v = tool_turn();
+        if let Some(last) = v.last_mut() {
+            *last = StreamEvent::StreamEnd {
+                reason: StopReason::Error,
+            };
+        }
+        v
     }
 
     #[tokio::test]
@@ -583,6 +622,53 @@ pub(crate) mod tests {
             ),
             "got {bodies:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn turn_ending_mid_tool_use_synthesizes_error_results() {
+        // Model emitted tool_calls but the stream ended with an error/length
+        // stop: the assistant message is recorded WITH tool_calls. Without
+        // synthesized results the NEXT request violates the protocol
+        // (tool_calls must be answered by tool messages).
+        let provider = MockProvider::new(vec![tool_turn_errored()]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(provider), tools, session, AgentConfig::default());
+
+        let reason = agent.run("hi".into()).await.unwrap();
+        assert_eq!(reason, StopReason::Error);
+
+        // The session must contain a ToolResult answering tool_use c1.
+        let answered = agent.session_entries().iter().any(|e| {
+            matches!(
+                e,
+                crate::session::SessionEntry::Message { message, .. }
+                if message.content.iter().any(|b| matches!(
+                    b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "c1"))
+            )
+        });
+        assert!(answered, "dangling tool_use c1 must get a synthesized result");
+
+        // And the wire form of the recorded history must be protocol-valid:
+        // every role:"tool" message follows an assistant carrying tool_calls.
+        let wire: Vec<serde_json::Value> = agent
+            .history()
+            .iter()
+            .flat_map(crate::provider::openai::messages_to_openai_for_test)
+            .collect();
+        let mut prev_has_tool_calls = false;
+        for msg in &wire {
+            let role = msg["role"].as_str().unwrap_or("");
+            if role == "tool" {
+                assert!(
+                    prev_has_tool_calls,
+                    "role:tool without preceding tool_calls: {wire:?}"
+                );
+            }
+            prev_has_tool_calls = msg.get("tool_calls").is_some();
+        }
     }
 
     #[tokio::test]
