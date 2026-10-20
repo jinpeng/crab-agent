@@ -21,7 +21,7 @@ grep-searcher = "0.1"
 grep-regex = "0.1"
 ignore = "0.4"
 blake3 = "1"
-rusqlite = { version = "3", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 similar = "3"
 tempfile = "3.27"
 shell-words = "1"
