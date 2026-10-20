@@ -126,12 +126,13 @@ impl StatusLine {
         truncate_to_width(&format!(" {left} "), width)
     }
 
-    /// `CH<pct>%`, or None when usage or the window is unknown.
+    /// `CH<pct>%/<window>` (pi's `20.5%/1.0M` convention), or None when usage
+    /// or the window is unknown.
     fn ch_segment(&self) -> Option<String> {
         let used = self.context_used?;
         let window = self.context_window.filter(|w| *w > 0)?;
         let pct = (used.saturating_mul(100) + window / 2) / window;
-        Some(format!("CH{pct}%"))
+        Some(format!("CH{pct}%/{}", kfmt(window)))
     }
 
     /// The working directory, with a leading `$HOME` shortened to `~`.
@@ -153,9 +154,13 @@ impl StatusLine {
 }
 
 /// Format a token count: `500` -> `"500"`, `1200` -> `"1.2k"`,
-/// `128000` -> `"128.0k"`.
+/// `128000` -> `"128.0k"`, `1048576` -> `"1.0M"`.
 fn kfmt(n: u64) -> String {
-    if n >= 1000 {
+    if n >= 1_000_000 {
+        let whole = n / 1_000_000;
+        let tenth = (n % 1_000_000) / 100_000;
+        format!("{whole}.{tenth}M")
+    } else if n >= 1000 {
         let whole = n / 1000;
         let tenth = (n % 1000) / 100;
         format!("{whole}.{tenth}k")
@@ -215,6 +220,8 @@ mod tests {
         assert_eq!(kfmt(500), "500");
         assert_eq!(kfmt(1200), "1.2k");
         assert_eq!(kfmt(128000), "128.0k");
+        assert_eq!(kfmt(1048576), "1.0M");
+        assert_eq!(kfmt(2_000_000), "2.0M");
     }
 
     #[test]
@@ -248,7 +255,7 @@ mod tests {
         let row = full().format_status_row(80);
         assert_eq!(visible_width(&row), 80, "got {row:?}");
         assert!(row.contains("↑12.3k ↓45.6k"), "got {row:?}");
-        assert!(row.contains("CH7%"), "got {row:?}"); // 8500/128000 ~ 6.6% -> 7%
+        assert!(row.contains("CH7%/128.0k"), "got {row:?}"); // 8500/128000 ~ 6.6% -> 7%
         assert!(row.contains("streaming"), "got {row:?}");
         assert!(row.trim_end().ends_with("deepseek/deepseek-chat"), "got {row:?}");
     }
