@@ -199,15 +199,17 @@ fn draw_confirm_modal(f: &mut Frame, state: &TuiState) {
         None => return,
     };
 
-    // Center the modal
-    let area = centered_rect(60, 20, f.area());
+    // Generous modal: approving a command you cannot read is a security UX
+    // failure, so the modal takes most of the screen (old 60x20% clipped long
+    // commands — and the key hint with them).
+    let area = centered_rect(80, 60, f.area());
 
     // Clear the area first
     f.render_widget(Clear, area);
 
-    // Build modal content
+    // The key hint LEADS: it must stay visible even when the command overflows.
     let text = format!(
-        "⚠ {} — {}\n\n[y]es  [n]o  [a]ll",
+        "[y]es  [n]o  [a]ll\n\n⚠ {} — {}\n",
         pending.prompt.tool, pending.prompt.summary
     );
 
@@ -371,6 +373,43 @@ mod tests {
         (0..h)
             .map(|y| (0..w - 1).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect()
+    }
+
+    /// Permission modal UX: the key hint must lead (visible even for long
+    /// commands) and the modal must be tall enough to inspect what you approve.
+    #[test]
+    fn confirm_modal_leads_with_hint_and_fits_long_commands() {
+        use crab_core::gate::Prompt;
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        let long_cmd = format!(
+            "run: cd /tmp && python3 - <<'PYEOF'\n{}\nPYEOF",
+            "x".repeat(400)
+        );
+        let (tx, _rx) = std::sync::mpsc::channel::<crab_core::gate::Decision>();
+        s.begin_confirm(Prompt { tool: "bash", summary: long_cmd }, tx);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &mut s)).unwrap();
+        let buf = term.backend().buffer();
+
+        let row_text = |y: u16| -> String {
+            (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()
+        };
+        let hint_row = (0..24).find(|y| row_text(*y).contains("[y]es"));
+        let cmd_row = (0..24).find(|y| row_text(*y).contains("python3"));
+        let hint = hint_row.expect("hint must be visible");
+        let cmd = cmd_row.expect("command start must be visible");
+        assert!(
+            hint < cmd,
+            "hint ({hint}) must lead the command ({cmd}): users must always see how to respond"
+        );
+        // Modal must be tall enough to actually inspect the command: the old
+        // 20%-height modal clipped it (and the hint) entirely.
+        let visible_cmd_rows = (0..24).filter(|y| row_text(*y).contains("xxxx")).count();
+        assert!(
+            visible_cmd_rows >= 5,
+            "only {visible_cmd_rows} command rows visible — modal too short"
+        );
     }
 
     /// The two status rows sit at the very bottom, below the input box:
