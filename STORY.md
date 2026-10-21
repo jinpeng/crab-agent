@@ -17,8 +17,12 @@ tool loop:
   cwd), a spinner with elapsed timer, and `/yolo` / `/model` slash commands
 - **Persistent sessions** (append-only JSONL, `--continue` resumes with full history)
 - **Permission gate** on anything that writes, runs, or touches the network
+- **Skills**: Agent Skills directories are discovered and advertised in the
+  system prompt; `/skill:<name>` injects one on demand
+- **Local observability**: versioned session log, `crab trace` (span tree),
+  `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-179 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+269 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -91,11 +95,11 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 
 | | |
 |---|---|
-| Lines of Rust | ~9,300 |
-| Tests | 207 (3 timing-sensitive ignored) |
-| Binary (release) | ~10 MiB |
+| Lines of Rust | ~12,500 |
+| Tests | 269 (3 timing-sensitive ignored) |
+| Binary (release) | ~12 MiB |
 | Cold start | sub-second (vs ~150 ms for the Node-based pi it was measured against) |
-| Commits | 124 |
+| Commits | 164 |
 | Commits authored by crab | 20 |
 
 ## Design
@@ -106,9 +110,13 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.2.0. It works, it self-builds, and it's published. The honest label is "early but
-real": the core loop, tools, config, MCP, and TUI are solid and tested; skills, themes,
-compaction, and a real extension API are deliberately future work.
+v0.3.0. It works, it self-builds, and it's published. The honest label is "early but
+real": the core loop, tools, config, MCP, and TUI are solid and tested. Since v0.2.0
+it gained **skills** (discovery, system-prompt advertisement, `/skill:<name>`), a
+**local observability stack** (session JSONL v2 with a format version and content
+digests, four-way usage, `crab trace`, `crab metrics` with versioned per-model
+pricing including peak/valley windows), and a pi-style status row below the input.
+Still deliberately future work: themes, compaction, and a real extension API.
 
 ---
 

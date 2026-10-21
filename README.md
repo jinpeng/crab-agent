@@ -59,6 +59,8 @@ The prompt is `crab> `. Slash commands:
 | `/yolo` | toggle allow-all: auto-approve every tool call for the rest of the session |
 | `/model <name>` | switch to the named provider profile from `~/.crab/config.toml` |
 | `/models` | open a picker to choose a profile with ↑↓/Enter |
+| `/skill:<name> [args]` | inject a discovered skill's instructions as a user message |
+| `/skills` | open a picker listing discovered skills; fills `/skill:<name>` into the input |
 
 While the agent is running, **Ctrl-C aborts the current run** (it does not exit
 `crab` — the text and tool results produced so far are kept on disk). A Ctrl-C
@@ -200,6 +202,24 @@ env = { BRAVE_API_KEY = "..." , NODE_OPTIONS = "--use-env-proxy" }
 `http`/`https` and `fetch` honor `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`. It is
 opt-in and requires a recent Node (the `fetch` path is v22.21.0 / v24.0.0+).
 
+## Skills
+
+`crab` discovers [Agent Skills](https://agentskills.io/specification) — directories
+containing a `SKILL.md` with `name` / `description` frontmatter — in two places:
+
+- **Project**: `.agents/skills/` in the current directory or any parent, up to and
+  including the git repo root.
+- **User**: `~/.agents/skills/`.
+
+Discovered skills are listed in the system prompt by name, description, and path —
+the body stays on disk, and the model is told to read the `SKILL.md` with the
+`read` tool when a task matches. On a name collision the first discovery wins:
+project beats user, nearer beats farther.
+
+`/skill:<name> [args]` is the explicit path: it injects the skill's full
+`SKILL.md` body as a user message, with any args appended as the request. Skills
+can bundle extra files (`references/`, `scripts/`, …) relative to their directory.
+
 ## Permissions
 
 Tool calls go through a permission gate, layered as follows:
@@ -237,6 +257,24 @@ crab --continue
 
 Interrupted runs are still resumable: text produced and tool results completed
 before a Ctrl-C abort are persisted.
+
+### Observability
+
+The session file is versioned JSONL: a `meta` row carries a format version, and the
+log records typed observation events (turn start/end, LLM calls with four-way token
+usage — prompt, completion, cache read, cache write — tool calls, content digests).
+Two subcommands consume it:
+
+```sh
+crab trace .crab/sessions/<file>.jsonl   # span tree of a session: turns -> llm/tool calls
+crab metrics 7                           # token/cost/latency report, per day and per model
+```
+
+Turn metrics accumulate in `.crab/metrics.sqlite` (per working directory, created
+best-effort — telemetry never enters the model context). Costing uses a built-in
+per-model pricing table with versioned rate history and peak/valley windows,
+overlaid by `~/.crab/pricing.toml` if you want your own rates. Models without a
+price show `-` rather than a fake `$0`.
 
 ## License
 
