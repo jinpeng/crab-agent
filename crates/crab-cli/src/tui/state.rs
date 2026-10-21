@@ -342,9 +342,13 @@ impl TuiState {
         provider_model: String,
         cwd: std::path::PathBuf,
         context_window: Option<u64>,
+        // Occupancy replayed from the session log at startup (`--continue`).
+        // None for a fresh session or a log with no usage yet; live usage
+        // events take over from here.
+        context_used: Option<u64>,
     ) -> Self {
         let mut status = StatusLine::new(provider_model.clone(), cwd);
-        status.set_context(None, context_window);
+        status.set_context(context_used, context_window);
         Self {
             bubbles: Vec::new(),
             input: InputBuffer::new(),
@@ -668,7 +672,7 @@ mod tests {
 
     #[test]
     fn text_delta_appends_to_open_assistant_bubble() {
-        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None);
+        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None, None);
 
         state.apply_agent_event(AgentEvent::TextDelta("hello".into()));
         state.apply_agent_event(AgentEvent::TextDelta(" world".into()));
@@ -684,7 +688,7 @@ mod tests {
 
     #[test]
     fn assistant_message_closes_bubble() {
-        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None);
+        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None, None);
 
         state.apply_agent_event(AgentEvent::TextDelta("hi".into()));
         state.apply_agent_event(AgentEvent::AssistantMessage(crab_core::types::Message {
@@ -701,7 +705,7 @@ mod tests {
 
     #[test]
     fn tool_call_shows_args_from_cache() {
-        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None);
+        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None, None);
 
         // First, the assistant message arrives with tool use
         state.apply_agent_event(AgentEvent::AssistantMessage(crab_core::types::Message {
@@ -730,7 +734,7 @@ mod tests {
 
     #[test]
     fn tool_finished_shows_result() {
-        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None);
+        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None, None);
 
         state.apply_agent_event(AgentEvent::ToolCallStarted {
             id: "t1".into(),
@@ -753,7 +757,7 @@ mod tests {
 
     #[test]
     fn aborted_adds_system_notice() {
-        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None);
+        let mut state = TuiState::new("test/model".into(), std::path::PathBuf::new(), None, None);
 
         state.apply_agent_event(AgentEvent::Finished {
             reason: crab_core::types::StopReason::Aborted,

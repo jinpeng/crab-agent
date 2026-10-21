@@ -313,7 +313,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     fn state_with(n: usize) -> TuiState {
-        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
         push_entries(&mut s, 0..n);
         s
     }
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn confirm_modal_leads_with_hint_and_fits_long_commands() {
         use crab_core::gate::Prompt;
-        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
         let long_cmd = format!(
             "run: cd /tmp && python3 - <<'PYEOF'\n{}\nPYEOF",
             "x".repeat(400)
@@ -420,6 +420,7 @@ mod tests {
             "deepseek/deepseek-chat".into(),
             std::path::PathBuf::from("/x"),
             Some(128_000),
+            None,
         );
         s.status.add_usage(8500, 100); // makes the CH segment appear
         let rows = render_frame(&mut s, 80, 12);
@@ -434,6 +435,21 @@ mod tests {
         );
         // Input box bottom border sits directly above the cwd row.
         assert!(rows[rows.len() - 3].contains('─'), "{rows:?}");
+    }
+
+    /// A `--continue` seed renders the CH segment on the very first frame —
+    /// no Usage event required (meter replay, not live accumulation).
+    #[test]
+    fn seeded_context_occupancy_shows_ch_before_any_usage_event() {
+        let mut s = TuiState::new(
+            "deepseek/deepseek-chat".into(),
+            std::path::PathBuf::from("/x"),
+            Some(128_000),
+            Some(85_000),
+        );
+        let rows = render_frame(&mut s, 80, 12);
+        let status_row = &rows[rows.len() - 1];
+        assert!(status_row.contains("CH66%/128.0k"), "{status_row:?}");
     }
 
     /// Draw and return the transcript rows, without the scrollbar column.
@@ -483,7 +499,7 @@ mod tests {
 
     #[test]
     fn wrapped_lines_count_towards_the_scroll_range() {
-        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None);
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
         s.bubbles.push(Bubble::Assistant {
             text: "word ".repeat(200),
             complete: true,

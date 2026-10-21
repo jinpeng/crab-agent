@@ -40,6 +40,10 @@ pub struct Startup {
     pub gate: PermissionGate,
     pub config: crab_core::config::Config,
     pub skills: Vec<crab_core::skills::Skill>,
+    /// Context occupancy replayed from the session log at startup — the exact
+    /// prompt size of the last provider request (None for a fresh session or
+    /// a log with no usage yet). Seeds the TUI status line on `--continue`.
+    pub context_used: Option<u64>,
 }
 
 impl From<&crate::Cli> for AppConfig {
@@ -152,6 +156,13 @@ pub async fn build_agent(
         Session::create(&dir).context("create session")?
     };
 
+    let context_used = if continue_ {
+        // Deterministic replay: the last provider-reported prompt size is the
+        // exact occupancy of the resumed conversation (meter 测量不改变系统).
+        crab_core::meter::context_used(session.entries())
+    } else {
+        None
+    };
     let agent = Agent::new(
         provider,
         tools,
@@ -167,6 +178,7 @@ pub async fn build_agent(
         gate,
         config,
         skills,
+        context_used,
     })
 }
 

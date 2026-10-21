@@ -55,7 +55,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
         gate,
         config,
         skills,
-        ..
+        context_used,
     } = startup;
     // Best-effort metrics sink (independent broadcast receiver).
     crate::spawn_metrics_sink(&mut agent, &provider);
@@ -99,6 +99,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
         format!("{}/{}", provider.provider_name, provider.model),
         cwd,
         provider.context_window,
+        context_used,
     );
     state.yolo = gate.is_permissive();
 
@@ -688,7 +689,7 @@ mod tests {
     #[test]
     fn esc_aborts_a_running_turn() {
         use crate::status::RunState;
-        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
         s.run_state = RunState::Streaming;
         assert_eq!(
             handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut s),
@@ -698,14 +699,14 @@ mod tests {
 
     #[test]
     fn esc_is_a_noop_when_idle() {
-        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
         assert_eq!(handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut s), None);
     }
 
     #[test]
     fn ctrl_c_does_nothing_running_or_idle() {
         use crate::status::RunState;
-        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
         // Running: must NOT abort — the key is left for the terminal's copy habit.
         s.run_state = RunState::Streaming;
         assert_eq!(
@@ -727,7 +728,7 @@ mod tests {
     /// left polling stdin would hang the process (the /quit freeze).
     #[test]
     fn slash_quit_sets_should_quit() {
-        let mut state = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None);
+        let mut state = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         dispatch_slash(state::SlashCommand::Quit, &mut state, &tx, &[], &[]);
         assert!(state.should_quit);
