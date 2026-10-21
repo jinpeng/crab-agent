@@ -935,6 +935,8 @@ cache_write = 0.07
             &user,
             r#"
 [models.deepseek-chat]
+[[models.deepseek-chat.versions]]
+since = "2025-02-09T00:00:00+08:00"
 input = 0.99
 
 [models.deepseek-flash]
@@ -944,11 +946,13 @@ output = 0.2
         )
         .unwrap();
         let p = load_pricing_from(Some(&user));
-        // flat user entry (since=0) merges with the embedded since=0 version:
+        // A user version with the same `since` merges into the embedded one:
         // user's non-zero field wins, embedded fields survive.
-        let v0 = p.models["deepseek-chat"].iter().find(|v| v.since == 0).unwrap();
+        let since = parse_rfc3339("2025-02-09T00:00:00+08:00").unwrap();
+        let v0 = p.models["deepseek-chat"].iter().find(|v| v.since == since).unwrap();
         assert_eq!(v0.base.input, 0.99);
         assert_eq!(v0.base.output, 1.10);
+        assert_eq!(v0.base.cache_read, 0.07);
         // user-only model appears
         assert!(p.models.contains_key("deepseek-flash"));
         // missing user file: embedded only
@@ -972,9 +976,9 @@ output = 4.00
         .unwrap();
         let p = load_pricing_from(Some(&user));
         let chain = &p.models["deepseek-chat"];
-        assert_eq!(chain.len(), 2, "embedded epoch version + user future version");
-        assert!(chain[0].since < chain[1].since);
-        assert_eq!(chain[1].base.input, 1.50);
+        assert_eq!(chain.len(), 3, "two embedded historical versions + user future version");
+        assert!(chain.windows(2).all(|w| w[0].since < w[1].since), "chain stays ascending");
+        assert_eq!(chain[2].base.input, 1.50);
     }
 
     #[test]

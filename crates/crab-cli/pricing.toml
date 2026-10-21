@@ -68,12 +68,44 @@ input = 1.32
 output = 3.96
 cache_read = 0.044
 
-# Legacy names (retired; the API may still accept them). Prices are the
-# pre-2025-09 values, kept so old sessions approximate — TODO verify dates.
+# Legacy names (the current pricing page lists only deepseek-flash / deepseek-v4-pro;
+# trackers report these aliases were retired on 2026-07-24, and the API may still
+# accept them). These are the flat PRE-V3.1 rates, kept so old sessions price
+# correctly. Dates pinned 2026-10-21:
+#   2024-05-06  V2-era flat rate 0.14 in / 0.28 out / 0.014 cache hit; the V3
+#               launch post kept charging it ("Until Feb 8: same as V2"). The
+#               cache-hit tier only arrived with disk caching later in 2024 (per
+#               trackers), so it is inert for the earliest calls.
+#   2025-01-20  deepseek-reasoner launches with R1 at 0.55 / 2.19 / 0.14, and holds
+#               that card until 2025-09-05 16:00 UTC.
+#   2025-02-09  (+08:00) deepseek-chat repriced to 0.27 / 1.10 / 0.07; the notice
+#               ended the discounted old rate at 2025-02-08 16:00 UTC.
+#   2025-09-06  (+08:00) both names were superseded by V3.1's unified
+#               0.56 / 1.68 / 0.07. That later card is NOT modelled here (it would
+#               need a LATER [[versions]] entry, out of scope for this data fix), so
+#               calls from 2025-09-06 to retirement still resolve to these rates.
+# Sources, retrieved 2026-10-21:
+#   https://api-docs.deepseek.com/news/news1226    V3: from Feb 8, 0.27 miss / 0.07 hit / 1.10 out
+#   https://api-docs.deepseek.com/news/news250120  R1 launch: 0.14 hit / 0.55 miss / 2.19 out
+#   https://api-docs.deepseek.com/news/news250821  V3.1: new pricing + off-peak end 2025-09-05 16:00 UTC
+#   https://pricetimeline.com/news/144             2025-08-21 diff of the official page: old
+#                                                  0.27/1.10/0.07 + 0.55/2.19/0.14 -> 0.56/1.68/0.07
+#   https://mungomash.com/ai/pricing-history/      dated points: V2 $0.14 on 2024-05-06, V3 $0.27 on 2025-02-08
+#   https://www.usagepricing.com/blueprint/deepseek  V2 launch: $0.14 in / $0.28 out
+# Not independently confirmed: the exact clock time of the 2025-02-08 16:00 UTC cutover
+# (DeepSeek's notice as quoted by third parties), the 2024-05-06 anchor and the
+# 0.014 V2 cache-hit rate (trackers, not DeepSeek's own page), and the 2026-07-24
+# retirement date. archive.org is unreachable from here.
 
 [models.deepseek-chat]
 [[models.deepseek-chat.versions]]
-since = "1970-01-01T00:00:00Z"
+since = "2024-05-06T00:00:00+08:00"
+input = 0.14
+output = 0.28
+cache_read = 0.014
+cache_write = 0.0
+[[models.deepseek-chat.versions]]
+since = "2025-02-09T00:00:00+08:00"
 input = 0.27
 output = 1.10
 cache_read = 0.07
@@ -81,7 +113,7 @@ cache_write = 0.0
 
 [models.deepseek-reasoner]
 [[models.deepseek-reasoner.versions]]
-since = "1970-01-01T00:00:00Z"
+since = "2025-01-20T00:00:00+08:00"
 input = 0.55
 output = 2.19
 cache_read = 0.14

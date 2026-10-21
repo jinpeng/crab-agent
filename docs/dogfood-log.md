@@ -58,3 +58,22 @@
 - commits: 10b3ea3 (CJK cursor), 5f33a34 (width.rs Unicode-aware), e106b12 (logo 重裁图，同批杂项)
 - 暴露的 crab 缺陷: 即本次修复的 TUI Unicode 宽度问题——任何人用 CJK 输入都会撞。单元测试覆盖宽/组合字符宽度与截断边界。
 - （过程细节未记录：权限确认次数 / edit 是否一次过 / 是否 crab 主导）
+
+## 2026-10-21 — 内置 pricing.toml 的 legacy DeepSeek since 日期核实
+
+- 任务: 用 web_fetch 核实 deepseek-chat / deepseek-reasoner 两个遗留模型的真实生效日期，替换 epoch 占位符；只允许数据 + 注释改动；要求列出每条来源 URL 的日期与价格、未核实项不得猜
+- 结果: **成功**（crab 主导，人复核后接收）
+- 权限确认次数: 0（`--print` 自动批准）
+- 卡点: 无（一次过）
+- crab 的亮点:
+  - **推翻了任务前提**：表里的数字不是“2025-09 之后的费率”，而是 2025-02（chat）和 R1 上线（reasoner）的旧卡；它用 PriceTimeline 对官方页面的 diff + DeepSeek 三篇官方 news 帖子重建时间线，而不是顺着 spec 的话说。
+  - 诚实列出“未能独立核实”清单（Feb-8 切换的精确时刻、2024-05-06 锚点、0.014 缓存价、2026-07-24 退役日期），未核实的保持原样。
+  - 主动做了一次性行为验证（临时测试确认 2025-02-08T15:59:59Z 还是旧价、之后是新价），验证后删除。
+  - **一次计划外改动透明申报**：两个测试硬编码了 epoch 占位符（`v.since == 0`），必须同步改；声明“tests only, no logic”，并顺带加强了断言（cache_read 字段合并存活）。
+- 人复核（接收前）:
+  - 亲手 curl 三篇官方帖子逐条对上：news1226（V3：“Until Feb 8: same as V2! From Feb 8 onwards: 0.27 miss / 0.07 hit / 1.10 out”）、news250120（R1：0.14 hit / 0.55 miss / 2.19 out，news 索引日期 2025/01/20）、news250821（V3.1：“New pricing starts & off-peak discounts end at Sep 5th, 2025, 16:00 UTC”）。
+  - V3.1 统一卡（0.56/1.68/0.07）只在注释里出现（明确不建模），官方 Terminus 帖（news250922）无价格，靠第三方截图——可接受，注释已注明来源。
+  - 抓到一个事实性小错：crab 写“retrieved 2026-10-20”，实际检索日是 10-21（模型弄错当天日期，非 crab 缺陷），改后提交。
+  - 全量 `cargo test --workspace`（269 过 / 3 ignored）+ clippy 干净，复跑确认。
+- 暴露的 crab 缺陷: 无新增。
+- commits: <本次>
