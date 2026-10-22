@@ -338,6 +338,11 @@ pub struct TuiState {
     pub provider_label: String,
     /// Cached tool args from AssistantMessage (for showing in tool bubbles).
     tool_args_cache: HashMap<ToolCallId, String>,
+    /// In-progress text selection (press-drag-release), absolute row indexes.
+    pub selection: Option<super::select::Selection>,
+    /// What the last draw rendered: selectable rows + screen geometry.
+    /// Refreshed every frame; mouse hit-testing runs against it.
+    pub select_grid: Option<super::select::SelectGrid>,
 }
 
 impl TuiState {
@@ -365,6 +370,8 @@ impl TuiState {
             yolo: false,
             provider_label: provider_model.clone(),
             tool_args_cache: HashMap::new(),
+            selection: None,
+            select_grid: None,
         }
     }
 
@@ -432,6 +439,33 @@ impl TuiState {
         self.bubbles.push(Bubble::System(format!("[error] {msg}")));
         self.scroll.scroll_to_bottom();
         self.set_run_state(RunState::Idle);
+    }
+
+    /// Mouse press: start a selection at the clicked cell (pi-style copy).
+    pub fn select_begin(&mut self, col: u16, row: u16) {
+        match self.select_grid.as_ref().and_then(|g| g.hit(col, row)) {
+            Some(pos) => {
+                self.selection = Some(super::select::Selection { anchor: pos, focus: pos });
+            }
+            None => self.selection = None,
+        }
+    }
+
+    /// Mouse drag while pressed: extend the selection.
+    pub fn select_update(&mut self, col: u16, row: u16) {
+        if let (Some(sel), Some(pos)) =
+            (&mut self.selection, self.select_grid.as_ref().and_then(|g| g.hit(col, row)))
+        {
+            sel.focus = pos;
+        }
+    }
+
+    /// Mouse release: return the selected text when the drag was non-trivial.
+    /// The highlight stays until the next press (pi behavior).
+    pub fn select_finish(&self) -> Option<String> {
+        let grid = self.select_grid.as_ref()?;
+        let sel = self.selection?;
+        (sel.anchor != sel.focus).then(|| super::select::extract(&grid.rows, &sel))
     }
 
     /// Apply an agent event to update state.

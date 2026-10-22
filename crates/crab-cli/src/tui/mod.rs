@@ -10,6 +10,7 @@
 
 mod confirm;
 mod input;
+mod select;
 mod state;
 mod view;
 
@@ -18,7 +19,8 @@ use crab_core::agent::AgentEvent;
 use crab_core::gate::{Decision, Prompt};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+        MouseEventKind,
     },
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
@@ -390,9 +392,21 @@ fn handle_event(
             }
         }
         // The wheel scrolls the transcript even while a modal or the agent is busy.
+        // Press-drag-release over the transcript selects text and copies it on
+        // release (pi-style copyOnSelect; the highlight lingers until the next press).
         Event::Mouse(m) => match m.kind {
             MouseEventKind::ScrollUp => state.scroll_up(WHEEL_LINES),
             MouseEventKind::ScrollDown => state.scroll_down(WHEEL_LINES),
+            MouseEventKind::Down(MouseButton::Left) => state.select_begin(m.column, m.row),
+            MouseEventKind::Drag(MouseButton::Left) => state.select_update(m.column, m.row),
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(text) = state.select_finish() {
+                    match select::copy_text(&text) {
+                        Ok(how) => state.notice(format!("copied ({how}, {} chars)", text.chars().count())),
+                        Err(e) => state.notice(format!("copy failed: {e}")),
+                    }
+                }
+            }
             _ => {}
         },
         // ratatui re-measures on the next draw.

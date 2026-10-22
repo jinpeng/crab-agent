@@ -3,13 +3,14 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 
+use super::select;
 use super::state::{Picker, Theme, TuiState, visible_window};
 
 /// Draw the full TUI.
@@ -49,24 +50,42 @@ fn draw_transcript(f: &mut Frame, state: &mut TuiState, area: Rect) {
         return;
     }
 
+    // One blank row between bubbles (pi-style breathing room) and at the end.
     let mut lines: Vec<Line> = Vec::new();
-    for bubble in &state.bubbles {
+    for (i, bubble) in state.bubbles.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::raw(""));
+        }
         lines.extend(bubble.to_text(area.width as usize).lines);
     }
-    // Blank line at the end for spacing.
     if !lines.is_empty() {
         lines.push(Line::raw(""));
     }
 
+    // Pre-wrap so screen rows match `rows` 1:1 — the same WordWrapper
+    // semantics crab rendered with before (see tui::select), minus the
+    // over-wide-row clipping that could drop a character off screen.
     let height = area.height as usize;
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-
-    // Reserve the right-hand column for the scrollbar once the text overflows.
+    let mut width = area.width as usize;
+    let mut rows = select::wrap_styled(&lines, width);
+    if rows.len() > height && area.width > 1 {
+        width -= 1; // reserve the scrollbar column
+        rows = select::wrap_styled(&lines, width);
+    }
+    let total = rows.len();
     let mut text_area = area;
-    let mut total = paragraph.line_count(area.width);
-    if total > height && area.width > 1 {
+    if width != area.width as usize {
         text_area.width -= 1;
-        total = paragraph.line_count(text_area.width);
+    }
+
+    // A width change re-wraps everything — absolute row indexes shift, so an
+    // existing selection would point at the wrong text.
+    if state
+        .select_grid
+        .as_ref()
+        .is_some_and(|g| g.width != text_area.width)
+    {
+        state.selection = None;
     }
 
     let max_offset = total.saturating_sub(height);
@@ -83,6 +102,25 @@ fn draw_transcript(f: &mut Frame, state: &mut TuiState, area: Rect) {
 
     // `Paragraph::scroll` takes a u16 row; clamp rather than wrap around.
     let top = (max_offset - scroll.offset).min(u16::MAX as usize);
+
+    // Snapshot the rows for hit-testing/copy before painting the highlight.
+    state.select_grid = Some(select::SelectGrid {
+        rows: rows.clone(),
+        top,
+        x: text_area.x,
+        y: text_area.y,
+        width: text_area.width,
+        height: area.height,
+    });
+    if let Some(sel) = state.selection {
+        select::highlight(
+            &mut rows,
+            &sel,
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+    }
+
+    let paragraph = Paragraph::new(rows);
     f.render_widget(paragraph.scroll((top as u16, 0)), text_area);
 
     if max_offset > 0 {
@@ -452,6 +490,57 @@ mod tests {
         assert!(status_row.contains("CH66%/128.0k"), "{status_row:?}");
     }
 
+    /// 消息之间有空行分隔（pi 式呼吸感），bubble 内部行保持紧凑。
+    #[test]
+    fn bubbles_are_separated_by_a_blank_row() {
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.bubbles.push(Bubble::User("first question".into()));
+        s.bubbles.push(Bubble::Assistant { text: "the answer".into(), complete: true });
+        let rows = render_frame(&mut s, 40, 12);
+        let pos_user = rows.iter().position(|r| r.contains("first question")).unwrap();
+        let pos_asst = rows.iter().position(|r| r.contains("the answer")).unwrap();
+        assert_eq!(pos_asst, pos_user + 2, "expected one blank row between bubbles: {rows:?}");
+        assert!(rows[pos_user + 1].trim().is_empty());
+    }
+
+    /// pi-style copy: press-drag-release over the transcript selects and
+    /// extracts the text. The grid comes from a real draw, so wrapping is
+    /// exercised end to end.
+    #[test]
+    fn drag_select_extracts_wrapped_text() {
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.bubbles.push(Bubble::Assistant {
+            text: "alpha beta gamma delta".into(),
+            complete: true,
+        });
+        // Draw once so select_grid exists. Area: 12 rows; transcript is the top
+        // (12 - 5) rows; wrap at width 20 wraps the text into two rows.
+        render_frame(&mut s, 20, 12);
+        let grid = s.select_grid.clone().unwrap();
+        let (row_alpha, row_delta) = {
+            let a = grid.rows.iter().position(|r| super::select::line_text(r).starts_with("alpha")).unwrap();
+            let b = grid.rows.iter().position(|r| super::select::line_text(r).starts_with("delta")).unwrap();
+            (a, b)
+        };
+        // 屏幕坐标：transcript 从 (0,0) 开始；选第一行 col 6 到第二行 col 5。
+        let top = grid.top;
+        s.select_begin(6, (row_alpha - top) as u16);
+        s.select_update(5, (row_delta - top) as u16);
+        let text = s.select_finish().unwrap();
+        assert_eq!(text, "beta gamma\ndelta", "{text:?}");
+    }
+
+    /// 单击（无拖拽）不产生拷贝文本，且保持不选中状态。
+    #[test]
+    fn click_without_drag_selects_nothing() {
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.bubbles.push(Bubble::User("hello".into()));
+        render_frame(&mut s, 20, 12);
+        s.select_begin(2, 0);
+        s.select_update(2, 0);
+        assert_eq!(s.select_finish(), None);
+    }
+
     /// Draw and return the transcript rows, without the scrollbar column.
     fn render(state: &mut TuiState, w: u16, h: u16) -> Vec<String> {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -525,3 +614,4 @@ mod tests {
         assert!(centered.y < 30);
     }
 }
+
