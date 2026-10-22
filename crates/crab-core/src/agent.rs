@@ -3,6 +3,25 @@ use crate::session::{Session, SessionEntry};
 use crate::tool::ToolRegistry;
 use crate::types::{ContentBlock, EntryId, Message, Role, StopReason, ToolCallId};
 
+/// One-shot summary instruction (spec §6). Kept short and concrete: the
+/// summary replaces history, so it must carry decisions, not flavour.
+const SUMMARY_PROMPT: &str = "\
+Summarize the following conversation so work can continue from your summary \
+alone. Keep, with specifics: the user's goals, decisions made and why, files \
+modified, commands run and their outcomes, pending tasks, and key technical \
+findings (error messages, APIs, formats). Drop pleasantries and restatements. \
+Under 800 words.\n\n[Conversation to summarize]";
+
+/// The result of one compaction pass (TUI notices; the event is authoritative).
+#[derive(Debug, PartialEq)]
+pub struct CompactReport {
+    pub strategy: crate::obs::CompactionStrategy,
+    pub shed_tool_results: u32,
+    pub turns_affected: u32,
+    /// 计划摘要但调用失败（或返回空文本），退回 shed-only（spec §6）。
+    pub summary_failed: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct AgentConfig {
     /// Prepended to the provider request as the system message. Empty = not injected.
@@ -49,6 +68,13 @@ pub enum AgentEvent {
     },
     Finished {
         reason: StopReason,
+    },
+    /// Compaction condensed the request view (auto or /compact). The TUI
+    /// surfaces it as a notice; the durable record is the Compacted obs event.
+    Compacted {
+        strategy: crate::obs::CompactionStrategy,
+        shed_tool_results: u32,
+        turns_affected: u32,
     },
 }
 
@@ -117,6 +143,147 @@ impl Agent {
     /// runs (e.g. the TUI's `/model`); must NOT be called while `run` holds `&mut self`.
     pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
         self.provider = provider;
+    }
+
+    /// 手动 /compact 入口：无视阈值，立即执行一次压缩（spec §4）。
+    pub async fn compact_now(&mut self) -> CompactReport {
+        self.run_compaction().await
+    }
+
+    fn compaction_due(&self) -> bool {
+        self.config.auto_compact_threshold > 0.0
+            && match (self.last_prompt, self.config.context_window) {
+                (Some(p), Some(w)) => {
+                    p as f64 > self.config.auto_compact_threshold * w as f64
+                }
+                _ => false,
+            }
+    }
+
+    /// 执行一次压缩（spec §5 瘦身 → §6 按需摘要 → 落盘 + 事件）。
+    async fn run_compaction(&mut self) -> CompactReport {
+        let sizes = crate::meter::prompt_sizes(self.session.entries());
+        let budget = crate::compact::Budget {
+            trigger: self.config.auto_compact_threshold,
+            keep: 0.4,
+            window: self.config.context_window,
+        };
+        let plan = crate::compact::plan(&self.history, &sizes, &budget);
+        if plan.keep_from == 0 {
+            return CompactReport {
+                strategy: crate::obs::CompactionStrategy::Shed,
+                shed_tool_results: 0,
+                turns_affected: 0,
+                summary_failed: false,
+            };
+        }
+
+        // 先确定性瘦身变换，计数（摘要路径用同一变换后的 prefix 做输入）
+        let prefix = &self.history[..plan.keep_from];
+        let mut names: std::collections::HashMap<ToolCallId, String> =
+            std::collections::HashMap::new();
+        for m in prefix {
+            for b in &m.content {
+                if let ContentBlock::ToolUse { id, name, .. } = b {
+                    names.insert(id.clone(), name.clone());
+                }
+            }
+        }
+        let shed_prefix: Vec<Message> = prefix
+            .iter()
+            .map(|m| crate::compact::shed_message(m, &names))
+            .collect();
+        let shed_count = prefix
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .count() as u32;
+        let turns_affected = (plan.keep_from / 2) as u32;
+
+        let mut strategy = crate::obs::CompactionStrategy::Shed;
+        let mut summary = None;
+        let mut summary_failed = false;
+        if plan.need_summary {
+            let mut req = vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: SUMMARY_PROMPT.into(),
+                }],
+            }];
+            req.extend(shed_prefix);
+            match self.provider.complete(&req, &[], None).await {
+                Ok(t) => {
+                    let text: String = t
+                        .message
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if text.trim().is_empty() {
+                        summary_failed = true;
+                    } else {
+                        strategy = crate::obs::CompactionStrategy::Summarize;
+                        summary = Some(text);
+                    }
+                }
+                Err(_) => summary_failed = true,
+            }
+        }
+
+        // up_to = 日志里第 keep_from-1 条 Message 的 EntryId；找不到（坏日志）
+        // 则放弃本次压缩——绝不落一条指向不存在条目的水位线。
+        let Some(up_to) = self
+            .session
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                SessionEntry::Message { id, .. } => Some(*id),
+                _ => None,
+            })
+            .nth(plan.keep_from - 1)
+        else {
+            return CompactReport {
+                strategy: crate::obs::CompactionStrategy::Shed,
+                shed_tool_results: 0,
+                turns_affected: 0,
+                summary_failed: false,
+            };
+        };
+
+        if let Err(e) = self.session.append_obs(crate::obs::ObsEvent {
+            run_id: self.next_run_id,
+            ts: crate::util::now_ms(),
+            body: crate::obs::ObsBody::Compacted {
+                up_to,
+                strategy,
+                shed_tool_results: shed_count,
+                turns_affected,
+                summary: summary.clone(),
+            },
+        }) {
+            eprintln!("[crab] obs append failed: {e}");
+        }
+        self.compactions.push(crate::compact::AppliedCompaction {
+            keep_from: plan.keep_from,
+            strategy,
+            summary,
+        });
+        let report = CompactReport {
+            strategy,
+            shed_tool_results: shed_count,
+            turns_affected,
+            summary_failed,
+        };
+        let _ = self.events_tx.send(AgentEvent::Compacted {
+            strategy,
+            shed_tool_results: shed_count,
+            turns_affected,
+        });
+        report
     }
 
     pub fn history(&self) -> &[Message] {
@@ -258,6 +425,12 @@ impl Agent {
                     reason: StopReason::Aborted,
                 });
                 return Ok(StopReason::Aborted);
+            }
+            // Compaction trigger is judged on the previous call's usage at the
+            // top of the loop, so a resumed session (--continue) compacts before
+            // its first request too.
+            if self.compaction_due() {
+                self.run_compaction().await;
             }
             let _ = self.events_tx.send(AgentEvent::TurnStarted { turn });
 
@@ -548,6 +721,131 @@ pub(crate) mod tests {
         assert_eq!(req.len(), 6, "{req:?}");
         assert!(!req.iter().any(|m| m.content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text == "u0"))));
         assert!(req[0].content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text.contains("[Earlier conversation summary]"))));
+    }
+
+    use crate::obs::CompactionStrategy;
+
+    /// 一次纯文本 turn，带指定 prompt 数的 usage
+    fn usage_turn(prompt_tokens: u32) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::TextDelta("working".into()),
+            StreamEvent::Usage { prompt_tokens, completion_tokens: 10,
+                cache_read_tokens: 0, cache_write_tokens: 0 },
+            StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+        ]
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_fires_when_prompt_crosses_threshold() {
+        // 窗口 100k × 0.8 = 80k。触发用上一轮的 usage 在本轮 loop 顶判定：
+        // run0(60k)→run1(80k，不严格大于)→run2(100k)；run3 的 loop 顶触发。
+        // 注意 plan 按 prompt 增量计费：平的序列会让后缀"免费"，usage 必须递增。
+        let provider = MockProvider::new(vec![
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+            vec![ // 摘要调用（need_summary 成立时消费）
+                StreamEvent::TextDelta("summary of earlier work".into()),
+                StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+            ],
+            usage_turn(50_000),
+        ]);
+        let mut config = AgentConfig::default();
+        config.context_window = Some(100_000);
+        config.auto_compact_threshold = 0.8;
+        let tools = ToolRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(provider), tools, session, config);
+        agent.run("start".into()).await.unwrap(); // turn0: 60k
+        agent.run("more".into()).await.unwrap();  // turn1: 80k（不触发）
+        agent.run("again".into()).await.unwrap(); // turn2: 100k
+        agent.run("third".into()).await.unwrap(); // loop 顶：100k > 80k → 压缩
+        let bodies = obs_bodies(&agent);
+        assert!(bodies.iter().any(|(_, b)| matches!(b, crate::obs::ObsBody::Compacted { .. })),
+            "expected a Compacted event, got {bodies:?}");
+        assert_eq!(agent.compactions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compact_now_sheds_and_appends_only_one_obs_line() {
+        // run0 用带 tool 的脚本（产生 ToolResult 供 shed），其第二次调用接 usage_turn(60k)；
+        // run1/run2 各一次 usage_turn。usage 递增 → plan 的增量计费有效。
+        let provider = MockProvider::new(vec![
+            tool_turn(),
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+            vec![ // need_summary 成立时的摘要调用
+                StreamEvent::TextDelta("summary text".into()),
+                StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+            ],
+        ]);
+        let mut config = AgentConfig::default();
+        config.context_window = Some(10_000); // 小窗口 → keep_from > 0
+        config.auto_compact_threshold = 0.0;
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let path = session.path().to_path_buf();
+        let mut agent = Agent::new(Box::new(provider), tools, session, config);
+        agent.run("one".into()).await.unwrap();
+        agent.run("two".into()).await.unwrap();
+        agent.run("three".into()).await.unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let report = agent.compact_now().await;
+        assert!(report.turns_affected > 0, "nothing compacted");
+        let after = std::fs::read_to_string(&path).unwrap();
+        // 红线：日志 append-only——after = before + 恰好一行
+        assert!(after.starts_with(&before), "log prefix violated");
+        let added = after[before.len()..].trim();
+        assert_eq!(added.lines().count(), 1, "expected exactly one new line");
+        assert!(added.contains("compacted"), "{added}");
+        // 视图反映最终策略：Summarize → prefix 被一条摘要替换；Shed → 块不删只换内容
+        let v = crate::compact::view(agent.history(), &agent.compactions);
+        if report.strategy == CompactionStrategy::Summarize {
+            assert!(v.len() < agent.history().len());
+            assert!(v[0].content.iter().any(|b| matches!(b,
+                crate::types::ContentBlock::Text { text } if text.contains("[Earlier conversation summary]"))));
+        } else {
+            assert_eq!(v.len(), agent.history().len());
+            assert!(v.iter().flat_map(|m| &m.content).any(|b| matches!(b,
+                crate::types::ContentBlock::ToolResult { content, .. } if content.contains("[shed:"))));
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_failure_falls_back_to_shed_only() {
+        struct Fail;
+        #[async_trait::async_trait]
+        impl crate::provider::Provider for Fail {
+            async fn complete(&self, _: &[crate::types::Message], _: &[serde_json::Value],
+                _: Option<&tokio::sync::broadcast::Sender<crate::stream::StreamEvent>>)
+                -> Result<crate::types::AssistantTurn, crate::provider::ProviderError> {
+                Err(crate::provider::ProviderError::Api { status: 500, body: "boom".into() })
+            }
+            fn label(&self) -> &str { "fail" }
+            fn model(&self) -> &str { "fail" }
+        }
+        let provider = MockProvider::new(vec![
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+        ]);
+        let mut config = AgentConfig::default();
+        config.context_window = Some(10_000);
+        let tools = ToolRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(provider), tools, session, config);
+        agent.run("x".into()).await.unwrap();
+        agent.run("y".into()).await.unwrap();
+        agent.run("z".into()).await.unwrap(); // 3 对 → plan 不会前置返回
+        agent.set_provider(Box::new(Fail));
+        let report = agent.compact_now().await;
+        assert_eq!(report.strategy, CompactionStrategy::Shed);
+        assert!(report.summary_failed); // 降级可见
     }
 
     #[tokio::test]
