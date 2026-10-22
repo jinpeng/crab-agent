@@ -37,6 +37,10 @@ pub struct Config {
     pub providers: HashMap<String, ProviderProfile>,
     #[serde(default)]
     pub mcp: std::collections::HashMap<String, McpServerConfig>,
+    /// Auto-compact when the last prompt exceeds this fraction of the context
+    /// window. Omitted = 0.8; 0 = disabled. Env CRAB_AUTO_COMPACT_THRESHOLD wins.
+    #[serde(default)]
+    pub auto_compact_threshold: Option<f64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +54,15 @@ pub enum ConfigError {
 impl Config {
     pub fn from_toml(s: &str) -> Result<Self, ConfigError> {
         toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))
+    }
+
+    /// Effective auto-compaction threshold: env > config file > 0.8 default
+    /// (0 = disabled).
+    pub fn auto_compact_threshold(&self) -> f64 {
+        resolve_threshold(
+            self.auto_compact_threshold,
+            std::env::var("CRAB_AUTO_COMPACT_THRESHOLD").ok(),
+        )
     }
 
     /// Load from explicit path (tests) or default ~/.crab/config.toml. Missing file = empty.
@@ -81,6 +94,17 @@ pub struct ResolvedProvider {
     pub api_key: String,
     pub context_window: Option<u64>,
     pub provider_name: String,
+}
+
+/// Threshold resolution: env wins over the config file; default 0.8.
+/// Broken env values fall through to the file value (fail-soft).
+fn resolve_threshold(file: Option<f64>, env: Option<String>) -> f64 {
+    if let Some(s) = env {
+        if let Ok(v) = s.parse() {
+            return v;
+        }
+    }
+    file.unwrap_or(0.8)
 }
 
 /// Synthesize final provider from config profile + env + CLI flag.
@@ -175,6 +199,20 @@ pub fn resolve_credentials(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_compact_threshold_defaults_and_overrides() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.auto_compact_threshold, None);
+        assert_eq!(resolve_threshold(c.auto_compact_threshold, None), 0.8); // 默认
+        let c = Config::from_toml("auto_compact_threshold = 0.5").unwrap();
+        assert_eq!(resolve_threshold(c.auto_compact_threshold, None), 0.5);
+        let c = Config::from_toml("auto_compact_threshold = 0").unwrap();
+        assert_eq!(resolve_threshold(c.auto_compact_threshold, None), 0.0); // 显式关闭
+        // env 优先；坏值 fail-soft 落到 file
+        assert_eq!(resolve_threshold(Some(0.5), Some("0.9".into())), 0.9);
+        assert_eq!(resolve_threshold(Some(0.5), Some("junk".into())), 0.5);
+    }
 
     const TOML: &str = r#"
 default_provider = "deepseek"
