@@ -44,6 +44,10 @@ pub struct Startup {
     /// prompt size of the last provider request (None for a fresh session or
     /// a log with no usage yet). Seeds the TUI status line on `--continue`.
     pub context_used: Option<u64>,
+    /// Full-fidelity conversation messages from the loaded session, in log
+    /// order. The TUI replays them into bubbles so `--continue` shows the
+    /// session, not an empty transcript.
+    pub replay: Vec<crab_core::types::Message>,
 }
 
 impl From<&crate::Cli> for AppConfig {
@@ -175,6 +179,19 @@ pub async fn build_agent(
     } else {
         Vec::new()
     };
+    // Display replay: the full-fidelity conversation (the log is never
+    // rewritten, so this shows everything — including pre-compaction turns).
+    let replay: Vec<crab_core::types::Message> = if continue_ {
+        session_entries_snapshot
+            .iter()
+            .filter_map(|e| match e {
+                crab_core::session::SessionEntry::Message { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let agent = Agent::new(
         provider,
         tools,
@@ -194,6 +211,7 @@ pub async fn build_agent(
         config,
         skills,
         context_used,
+        replay,
     })
 }
 

@@ -441,6 +441,84 @@ impl TuiState {
         self.set_run_state(RunState::Idle);
     }
 
+    /// Replay one persisted session message into transcript bubbles (`--continue`).
+    /// Mirrors the live event flow: user text → `User` bubble, assistant text →
+    /// a complete `Assistant` bubble, tool_use → `Tool` bubble whose result is
+    /// filled by the following message's matching tool_result block.
+    pub fn replay_message(&mut self, msg: &crab_core::types::Message) {
+        use crab_core::types::{ContentBlock, Role};
+        match msg.role {
+            Role::User => {
+                let mut texts = Vec::new();
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } => texts.push(text.clone()),
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => {
+                            // Fill the matching Tool bubble (live path: ToolCallFinished).
+                            for bubble in self.bubbles.iter_mut().rev() {
+                                if let Bubble::Tool {
+                                    id: bid,
+                                    result: r,
+                                    ..
+                                } = bubble
+                                    && bid == tool_use_id
+                                {
+                                    let (text, truncated) = truncate_result(content);
+                                    *r = Some(ToolResult {
+                                        text,
+                                        is_error: *is_error,
+                                        truncated,
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                        ContentBlock::ToolUse { .. } => {}
+                    }
+                }
+                if !texts.is_empty() {
+                    self.bubbles.push(Bubble::User(texts.join("\n")));
+                }
+            }
+            Role::Assistant => {
+                let text: String = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    self.bubbles.push(Bubble::Assistant { text, complete: true });
+                }
+                // Tool bubbles come after the text (live order: text streams,
+                // then ToolCallStarted fires per tool_use block).
+                for block in &msg.content {
+                    if let ContentBlock::ToolUse { id, name, input } = block {
+                        let args_str = compact_json(input);
+                        self.tool_args_cache
+                            .insert(id.clone(), format!("{name} {args_str}"));
+                        self.bubbles.push(Bubble::Tool {
+                            id: id.clone(),
+                            name: name.clone(),
+                            args: format!("{name} {args_str}"),
+                            result: None,
+                        });
+                    }
+                }
+            }
+        }
+        if self.scroll.follow {
+            self.scroll.offset = 0;
+        }
+    }
+
     /// Mouse press: start a selection at the clicked cell (pi-style copy).
     pub fn select_begin(&mut self, col: u16, row: u16) {
         match self.select_grid.as_ref().and_then(|g| g.hit(col, row)) {
@@ -718,6 +796,109 @@ impl Bubble {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn msg(role: crab_core::types::Role, content: Vec<crab_core::types::ContentBlock>) -> crab_core::types::Message {
+        crab_core::types::Message { role, content }
+    }
+
+    #[test]
+    fn replay_rebuilds_user_and_assistant_bubbles() {
+        use crab_core::types::{ContentBlock, Role};
+        let mut state = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        state.replay_message(&msg(Role::User, vec![ContentBlock::Text { text: "hi".into() }]));
+        state.replay_message(&msg(Role::Assistant, vec![ContentBlock::Text { text: "hello".into() }]));
+        assert_eq!(state.bubbles.len(), 2);
+        assert!(matches!(&state.bubbles[0], Bubble::User(t) if t == "hi"));
+        assert!(
+            matches!(&state.bubbles[1], Bubble::Assistant { text, complete: true } if text == "hello"),
+            "{:?}",
+            state.bubbles[1]
+        );
+    }
+
+    #[test]
+    fn replay_pairs_tool_use_with_result() {
+        use crab_core::types::{ContentBlock, Role};
+        let mut state = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        state.replay_message(&msg(Role::User, vec![ContentBlock::Text { text: "count".into() }]));
+        state.replay_message(&msg(
+            Role::Assistant,
+            vec![
+                ContentBlock::Text { text: "counting".into() },
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+            ],
+        ));
+        state.replay_message(&msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".into(),
+                content: "total 3".into(),
+                is_error: false,
+            }],
+        ));
+        // 顺序：User(question) → Assistant(text) → Tool(带结果)。
+        assert_eq!(state.bubbles.len(), 3, "{:?}", state.bubbles);
+        assert!(matches!(&state.bubbles[1], Bubble::Assistant { text, .. } if text == "counting"));
+        match &state.bubbles[2] {
+            Bubble::Tool { name, args, result, .. } => {
+                assert_eq!(name, "bash");
+                assert!(args.contains("bash"), "{args}");
+                let r = result.as_ref().expect("result filled");
+                assert_eq!(r.text, "total 3");
+                assert!(!r.is_error);
+            }
+            other => panic!("expected Tool bubble, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_marks_error_results() {
+        use crab_core::types::{ContentBlock, Role};
+        let mut state = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        state.replay_message(&msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "c9".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "/x"}),
+            }],
+        ));
+        state.replay_message(&msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "c9".into(),
+                content: "no such file".into(),
+                is_error: true,
+            }],
+        ));
+        let r = match &state.bubbles[0] {
+            Bubble::Tool { result, .. } => result.as_ref().unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert!(r.is_error);
+        assert_eq!(r.text, "no such file");
+    }
+
+    #[test]
+    fn replay_without_text_blocks_skips_empty_bubbles() {
+        use crab_core::types::{ContentBlock, Role};
+        let mut state = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        // 纯 tool_use 的 assistant 消息不产生空 Assistant bubble。
+        state.replay_message(&msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "grep".into(),
+                input: serde_json::json!({}),
+            }],
+        ));
+        assert_eq!(state.bubbles.len(), 1);
+        assert!(matches!(&state.bubbles[0], Bubble::Tool { .. }));
+    }
 
     #[test]
     fn text_delta_appends_to_open_assistant_bubble() {
