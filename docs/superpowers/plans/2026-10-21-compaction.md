@@ -219,10 +219,32 @@ mod tests {
     #[test]
     fn keeps_largest_suffix_under_budget_min_two_pairs() {
         // 8 pairs, each ~1000 tok; target 40% of 6000 = 2400 → 2 pairs
+        //（need_summary 不在此断言：见 no_summary_when_prefix_sheds_to_nothing）
         let h = history(8);
         let p = plan(&h, &sizes(8), &budget(6000));
         assert_eq!(p.keep_from, 2 * (8 - 2));
-        assert!(!p.need_summary);
+    }
+
+    #[test]
+    fn no_summary_when_prefix_sheds_to_nothing() {
+        // prefix 主体是一个大 ToolResult（可 shed）；shed 后 prefix 极小 → 无需摘要。
+        // 注意：need_summary 的比率估计需要真实量级的数据——2 字节消息 +
+        // 1000-token 增量会让 r≈250 tok/byte，任何 prefix 都显得巨大。
+        let big = "x".repeat(8000);
+        let h = vec![
+            user("q"),
+            assistant_tool_use("c1"),
+            user_tool_result("c1", &big),
+            assistant("ok"),
+            user("q2"),
+            assistant("done2"),
+            user("q3"),
+            assistant("done3"),
+        ];
+        let sizes = vec![1000, 5000, 9000, 13_000]; // 增长主要来自 tool_result
+        let p = plan(&h, &sizes, &budget(16_000)); // target 6400 < 8000 → m=2
+        assert_eq!(p.keep_from, 4);
+        assert!(!p.need_summary, "shed prefix is tiny; no summary needed");
     }
 
     #[test]

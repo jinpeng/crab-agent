@@ -2,7 +2,44 @@
 //! plan 决策、view 变换都不碰 IO、不碰模型；agent loop 是薄适配器。
 
 use crate::obs::CompactionStrategy;
-use crate::types::Message;
+use crate::types::{ContentBlock, Message, ToolCallId};
+use std::collections::HashMap;
+
+/// Text 块超过此长度进入瘦身（spec §5）。
+const SHED_TEXT_CHARS: usize = 2048;
+const SHED_HEAD_CHARS: usize = 200;
+
+/// 确定性瘦身单条消息（spec §5）。不改 role、不删块——wire 配对完整。
+pub fn shed_message(m: &Message, tool_names: &HashMap<ToolCallId, String>) -> Message {
+    let content = m
+        .content
+        .iter()
+        .map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                let name = tool_names
+                    .get(tool_use_id)
+                    .map(String::as_str)
+                    .unwrap_or("tool result");
+                ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: format!(
+                        "[shed: {name} → {} bytes; re-run the tool if needed]",
+                        content.len()
+                    ),
+                    is_error: *is_error,
+                }
+            }
+            ContentBlock::Text { text } if text.chars().count() > SHED_TEXT_CHARS => {
+                let head: String = text.chars().take(SHED_HEAD_CHARS).collect();
+                ContentBlock::Text {
+                    text: format!("{head}…({} chars total, shed)", text.chars().count()),
+                }
+            }
+            other => other.clone(),
+        })
+        .collect();
+    Message { role: m.role, content }
+}
 
 /// 压缩预算（spec §3）。
 pub struct Budget {
@@ -135,6 +172,44 @@ mod tests {
 
     fn budget(window: u64) -> Budget {
         Budget { trigger: 0.8, keep: 0.4, window: Some(window) }
+    }
+
+    use crate::types::ToolCallId;
+    use std::collections::HashMap;
+
+    #[test]
+    fn sheds_tool_result_content_but_keeps_the_block() {
+        let mut names = HashMap::new();
+        names.insert("c1".to_string(), "read".to_string());
+        let m = user_tool_result("c1", &"x".repeat(12_400));
+        let shed = shed_message(&m, &names);
+        let ContentBlock::ToolResult { content, is_error, tool_use_id } = &shed.content[0] else {
+            panic!("block kind changed");
+        };
+        assert_eq!(tool_use_id, "c1");
+        assert!(!is_error);
+        assert!(content.contains("[shed: read"), "{content}");
+        assert!(content.contains("12400 bytes"), "{content}");
+        assert!(!content.starts_with('x'));
+    }
+
+    #[test]
+    fn truncates_long_text_blocks() {
+        let m = user(&"word ".repeat(600)); // 3000 chars
+        let shed = shed_message(&m, &HashMap::new());
+        let ContentBlock::Text { text } = &shed.content[0] else {
+            panic!("block kind changed");
+        };
+        assert!(text.contains("chars total, shed"), "{text}");
+        assert!(text.chars().count() < 400, "{}", text.chars().count());
+    }
+
+    #[test]
+    fn short_text_and_tooluse_args_pass_through() {
+        let m = user("short question");
+        assert_eq!(shed_message(&m, &HashMap::new()), m);
+        let m = assistant_tool_use("c1");
+        assert_eq!(shed_message(&m, &HashMap::new()), m);
     }
 
     #[test]
