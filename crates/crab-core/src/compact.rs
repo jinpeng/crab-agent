@@ -254,7 +254,6 @@ mod tests {
         Budget { trigger: 0.8, keep: 0.4, window: Some(window) }
     }
 
-    use crate::types::ToolCallId;
     use std::collections::HashMap;
 
     use crate::obs::{ObsBody, ObsEvent};
@@ -446,7 +445,7 @@ mod tests {
         h.push(user("current input"));
         let p = plan(&h, &sizes(5), &budget(3000)); // target 1200 → 抬到最小 2 对
         assert_eq!(p.keep_from, 2 * (5 - 2));
-        assert!(p.keep_from % 2 == 0);
+        assert!(p.keep_from.is_multiple_of(2));
     }
 
     #[test]
@@ -463,6 +462,6 @@ mod tests {
         let h = history(6); // "u0"/"a0"…每条 ~2-3 字节
         let p = plan(&h, &sizes(6), &Budget { trigger: 0.8, keep: 0.4, window: None });
         // 确定性即可：不 panic、keep_from 落在边界
-        assert!(p.keep_from % 2 == 0);
+        assert!(p.keep_from.is_multiple_of(2));
     }
 }

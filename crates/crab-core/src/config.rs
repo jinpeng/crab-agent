@@ -99,10 +99,10 @@ pub struct ResolvedProvider {
 /// Threshold resolution: env wins over the config file; default 0.8.
 /// Broken env values fall through to the file value (fail-soft).
 fn resolve_threshold(file: Option<f64>, env: Option<String>) -> f64 {
-    if let Some(s) = env {
-        if let Ok(v) = s.parse() {
-            return v;
-        }
+    if let Some(s) = env
+        && let Ok(v) = s.parse()
+    {
+        return v;
     }
     file.unwrap_or(0.8)
 }

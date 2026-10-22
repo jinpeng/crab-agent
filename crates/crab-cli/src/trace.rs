@@ -114,6 +114,9 @@ pub fn build_traces(entries: &[SessionEntry]) -> Vec<Trace> {
                         });
                     }
                 }
+                // Compacted: a view-rewriting event — the trace spans are built
+                // from what actually ran, so nothing to record here.
+                ObsBody::Compacted { .. } => {}
             },
             SessionEntry::Message { message, .. } => {
                 // Collect tool_use blocks for the join; summarize other blocks

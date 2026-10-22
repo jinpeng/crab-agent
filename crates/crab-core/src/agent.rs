@@ -698,12 +698,14 @@ pub(crate) mod tests {
         let tools = ToolRegistry::new();
         let dir = tempfile::tempdir().unwrap();
         let session = crate::session::Session::create(dir.path()).unwrap();
-        let mut config = AgentConfig::default();
-        config.compactions = vec![crate::compact::AppliedCompaction {
-            keep_from: 2,
-            strategy: crate::obs::CompactionStrategy::Summarize,
-            summary: Some("earlier we chose X".into()),
-        }];
+        let config = AgentConfig {
+            compactions: vec![crate::compact::AppliedCompaction {
+                keep_from: 2,
+                strategy: crate::obs::CompactionStrategy::Summarize,
+                summary: Some("earlier we chose X".into()),
+            }],
+            ..Default::default()
+        };
         let mut agent = Agent::new(Box::new(provider), tools, session, config);
         // 预置 3 对历史（直接推入，绕过 run）
         for i in 0..3 {
@@ -750,9 +752,11 @@ pub(crate) mod tests {
             ],
             usage_turn(50_000),
         ]);
-        let mut config = AgentConfig::default();
-        config.context_window = Some(100_000);
-        config.auto_compact_threshold = 0.8;
+        let config = AgentConfig {
+            context_window: Some(100_000),
+            auto_compact_threshold: 0.8,
+            ..Default::default()
+        };
         let tools = ToolRegistry::new();
         let dir = tempfile::tempdir().unwrap();
         let session = crate::session::Session::create(dir.path()).unwrap();
@@ -781,9 +785,11 @@ pub(crate) mod tests {
                 StreamEvent::StreamEnd { reason: StopReason::EndTurn },
             ],
         ]);
-        let mut config = AgentConfig::default();
-        config.context_window = Some(10_000); // 小窗口 → keep_from > 0
-        config.auto_compact_threshold = 0.0;
+        let config = AgentConfig {
+            context_window: Some(10_000), // 小窗口 → keep_from > 0
+            auto_compact_threshold: 0.0,
+            ..Default::default()
+        };
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(Noop));
         let dir = tempfile::tempdir().unwrap();
@@ -833,8 +839,10 @@ pub(crate) mod tests {
             usage_turn(80_000),
             usage_turn(100_000),
         ]);
-        let mut config = AgentConfig::default();
-        config.context_window = Some(10_000);
+        let config = AgentConfig {
+            context_window: Some(10_000),
+            ..Default::default()
+        };
         let tools = ToolRegistry::new();
         let dir = tempfile::tempdir().unwrap();
         let session = crate::session::Session::create(dir.path()).unwrap();

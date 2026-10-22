@@ -205,6 +205,13 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
                             }
                         }
                     }
+                    UiCommand::Compact => {
+                        let report = agent.compact_now().await;
+                        if report.turns_affected == 0 {
+                            let _ = ui_tx.send(UiEvent::Notice("nothing to compact".into()));
+                        }
+                        // 非零情况由 AgentEvent::Compacted 处理器统一通知
+                    }
                     UiCommand::Quit => break,
                 }
             }
@@ -265,6 +272,8 @@ enum UiCommand {
     ToggleYolo,
     /// Switch to a named provider profile. TUI updates its label on success.
     SetModel(String),
+    /// `/compact`: compact the conversation immediately.
+    Compact,
 }
 
 /// Events to TUI from agent/async context.
@@ -279,6 +288,8 @@ enum UiEvent {
     ModelChanged(String),
     /// Updated git branch for the status line (from the 2s refresher task).
     BranchChanged(Option<String>),
+    /// A notice produced by the async side (e.g. "nothing to compact").
+    Notice(String),
 }
 
 /// Synchronous TUI event loop.
@@ -325,6 +336,7 @@ fn run_tui_loop(
                     state.notice(format!("switched to {label}"));
                 }
                 UiEvent::BranchChanged(branch) => state.status.set_branch(branch),
+                UiEvent::Notice(msg) => state.notice(msg),
             }
         }
 
@@ -583,9 +595,12 @@ fn dispatch_slash(
                 "no skills found (looked in ~/.agents/skills and project .agents/skills)",
             ),
         },
+        state::SlashCommand::Compact => {
+            let _ = cmd_tx.blocking_send(UiCommand::Compact);
+        }
         state::SlashCommand::Unknown(name) => {
             state.notice(format!(
-                "unknown command /{name}  (try /quit, /yolo, /model <name>, /skills, /skill:<name>)"
+                "unknown command /{name}  (try /quit, /yolo, /model <name>, /skills, /skill:<name>, /compact)"
             ));
         }
     }

@@ -156,12 +156,24 @@ pub async fn build_agent(
         Session::create(&dir).context("create session")?
     };
 
+    let session_entries_snapshot: Vec<crab_core::session::SessionEntry> = if continue_ {
+        session.entries().to_vec()
+    } else {
+        Vec::new()
+    };
     let context_used = if continue_ {
         // Deterministic replay: the last provider-reported prompt size is the
         // exact occupancy of the resumed conversation (meter 测量不改变系统).
-        crab_core::meter::context_used(session.entries())
+        crab_core::meter::context_used(&session_entries_snapshot)
     } else {
         None
+    };
+    // Replay Compacted obs events so the resumed session rebuilds the same
+    // request view the model saw before (日志即真相，视图可重建).
+    let compactions = if continue_ {
+        crab_core::compact::resolve(&session_entries_snapshot)
+    } else {
+        Vec::new()
     };
     let agent = Agent::new(
         provider,
@@ -169,6 +181,9 @@ pub async fn build_agent(
         session,
         AgentConfig {
             system_prompt,
+            context_window: resolved.context_window,
+            auto_compact_threshold: config.auto_compact_threshold(),
+            compactions,
         },
     );
     Ok(Startup {

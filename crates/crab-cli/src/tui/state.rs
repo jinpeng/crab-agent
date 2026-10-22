@@ -233,6 +233,8 @@ pub enum SlashCommand {
     Skill(String, Option<String>),
     /// Open the interactive skill picker (`/skills`).
     PickSkill,
+    /// Compact the conversation now (`/compact`).
+    Compact,
     /// Unrecognized `/something`.
     Unknown(String),
 }
@@ -252,6 +254,7 @@ pub fn parse_slash(text: &str) -> Option<SlashCommand> {
         "model" | "m" => SlashCommand::Model(arg),
         "models" => SlashCommand::PickModel,
         "skills" => SlashCommand::PickSkill,
+        "compact" => SlashCommand::Compact,
         other if other.starts_with("skill:") => {
             let name = other["skill:".len()..].trim().to_string();
             SlashCommand::Skill(name, arg)
@@ -464,6 +467,18 @@ impl TuiState {
                 ..
             } => {
                 self.status.add_usage(prompt_tokens, completion_tokens);
+            }
+            Compacted {
+                strategy,
+                shed_tool_results,
+                turns_affected,
+            } => {
+                let mut msg =
+                    format!("compacted {turns_affected} turns, shed {shed_tool_results} tool results");
+                if matches!(strategy, crab_core::obs::CompactionStrategy::Summarize) {
+                    msg.push_str(" + summary");
+                }
+                self.notice(msg);
             }
             AssistantMessage(msg) => {
                 // Cache tool args and mark assistant bubble as complete
@@ -899,6 +914,7 @@ mod tests {
     #[test]
     fn parse_skills_opens_picker() {
         assert_eq!(parse_slash("/skills"), Some(SlashCommand::PickSkill));
+        assert_eq!(parse_slash("/compact"), Some(SlashCommand::Compact));
     }
 
     #[test]
