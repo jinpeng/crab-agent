@@ -22,7 +22,7 @@ tool loop:
 - **Local observability**: versioned session log, `crab trace` (span tree),
   `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-269 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+340 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -95,12 +95,12 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 
 | | |
 |---|---|
-| Lines of Rust | ~12,500 |
-| Tests | 269 (3 timing-sensitive ignored) |
+| Lines of Rust | ~15,700 |
+| Tests | 340 (3 timing-sensitive ignored) |
 | Binary (release) | ~12 MiB |
 | Cold start | sub-second (vs ~150 ms for the Node-based pi it was measured against) |
-| Commits | 164 |
-| Commits authored by crab | 20 |
+| Commits | 190 |
+| Commits authored by crab | 21 |
 
 ## Design
 
@@ -110,13 +110,20 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.3.0. It works, it self-builds, and it's published. The honest label is "early but
-real": the core loop, tools, config, MCP, and TUI are solid and tested. Since v0.2.0
-it gained **skills** (discovery, system-prompt advertisement, `/skill:<name>`), a
-**local observability stack** (session JSONL v2 with a format version and content
-digests, four-way usage, `crab trace`, `crab metrics` with versioned per-model
-pricing including peak/valley windows), and a pi-style status row below the input.
-Still deliberately future work: themes, compaction, and a real extension API.
+v0.4.0. It works, it self-builds, and it's published. The honest label is "early but
+real": the core loop, tools, config, MCP, and TUI are solid and tested. Since v0.3.0
+it gained **context compaction** (deterministic tool-result shedding plus on-demand
+LLM summary, replayable from the log — the session file is never rewritten), a
+**meter** that seeds exact context occupancy and token counters at `--continue`,
+a **pi-parity status line** (↑↓ input/output, R/W cache tokens, CH cache-hit rate,
+`$` cumulative cost, one-decimal context percent), **pi-style copy** (drag to
+select, release to copy) with proper spacing between messages, and **slash-command
+hints** that complete commands *and their arguments* (`/model ` lists profiles,
+`/skill:` lists skills). It also ships a faithful pre-wrap of the transcript that
+fixed a ratatui rendering bug — over-wide rows were clipped and a character could
+silently disappear off screen.
+Still deliberately future work: themes, session fork/branch, and a real extension
+API.
 
 ---
 

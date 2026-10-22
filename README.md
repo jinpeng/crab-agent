@@ -56,7 +56,10 @@ crab
 ```
 
 The prompt is `crab> `. Type `/` to browse slash commands with descriptions
-(↑↓ to choose, Enter to complete, Esc to dismiss). Slash commands:
+(↑↓ to choose, Enter to complete, Esc to dismiss — after `/model ` and
+`/skill:` the hint completes arguments too). The transcript supports
+pi-style copy: drag to select, release to copy (pbcopy on macOS, OSC52
+elsewhere). Slash commands:
 
 | command | effect |
 | --- | --- |
