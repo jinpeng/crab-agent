@@ -136,8 +136,10 @@ seam 在 `run_inner` 的 `request_msgs` 构造点。agent loop、TUI、`/compact
 
 - `plan`：水位线计算、最小 2-turn 保留、预算边界、配对中不切
 - `view`：shed / summarize / replay 三种形态
-- **wire 有效性不变式**（每个 view 测试都要断言）：user/assistant 交替、
-  每个 tool_use 后紧跟同序 tool_result、system 注入不受影响
+- **view wire 有效性不变式**（每个 view 测试都要断言）：视图以 user 起始、
+  每个 tool_use 后紧跟同序 tool_result。允许连续 user 消息——系统注入与
+  摘要消息都产生 user,user（OpenAI/DeepSeek/Kimi wire 均接受；严格交替
+  从来不是真不变式，实现时修正）。
 - **replay 确定性**：增量 apply（事件逐个到达）== 全量 rebuild（resume 时）
 - **红线**：compact 前后 session 文件除新增 obs 行外逐字节不变
 - 摘要失败降级：view 退回 shed-only，落盘事件 strategy = Shed

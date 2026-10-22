@@ -540,13 +540,11 @@ Expected: 全部 PASS
     use crate::session::{SessionEntry, Session};
     use crate::obs::{ObsEvent, ObsBody};
 
-    fn alternating_assert(view: &[Message]) {
-        // wire 不变式：user 起始、严格交替（任何 pair 边界可切）
-        for (i, m) in view.iter().enumerate() {
-            let expect_user = i % 2 == 0;
-            assert_eq!(m.role == Role::User, expect_user, "msg {i} breaks alternation");
-        }
-        // 每个 tool_use 在紧随的 user 消息里有同 id 的 tool_result
+    /// wire 不变式：视图以 user 起始；每个 tool_use 在紧随的 user 消息里有同 id
+    /// tool_result。允许连续 user（系统注入与摘要消息都产生 user,user——
+    /// OpenAI/DeepSeek/Kimi wire 均接受；严格交替从来不是真不变式）。
+    fn wire_invariants_assert(view: &[Message]) {
+        assert!(view.first().is_some_and(|m| m.role == Role::User));
         for (i, m) in view.iter().enumerate() {
             for b in &m.content {
                 if let ContentBlock::ToolUse { id, .. } = b {
@@ -578,37 +576,41 @@ Expected: 全部 PASS
     #[test]
     fn shed_view_keeps_suffix_verbatim_and_sheds_prefix() {
         let h = sample_history();
+        // keep_from=4：prefix = [user, tool_use, tool_result, assistant]，含可 shed 的块
         let applied = vec![AppliedCompaction {
-            keep_from: 2,
+            keep_from: 4,
             strategy: CompactionStrategy::Shed,
             summary: None,
         }];
         let v = view(&h, &applied);
         assert_eq!(v.len(), h.len()); // 块不删，只换内容
-        alternating_assert(&v);
-        // prefix 的 tool_result 被 shed
+        wire_invariants_assert(&v);
+        // prefix 的 tool_result 被 shed（占位符保留工具名）
         let ContentBlock::ToolResult { content, .. } = &v[2].content[0] else {
             panic!()
         };
-        assert!(content.contains("[shed:"), "{content}");
+        assert!(content.contains("[shed: read"), "{content}");
         // suffix 逐字节原样
-        assert_eq!(v[3..], h[3..]);
+        assert_eq!(v[4..], h[4..]);
     }
 
     #[test]
     fn summarize_view_replaces_prefix_with_single_user_message() {
         let h = sample_history();
         let v = view(&h, &[AppliedCompaction {
-            keep_from: 2,
+            keep_from: 4,
             strategy: CompactionStrategy::Summarize,
             summary: Some("we read the file".into()),
         }]);
-        assert_eq!(v.len(), h.len() - 2 + 1);
+        assert_eq!(v.len(), h.len() - 4 + 1);
         assert!(matches!(&v[0].role, Role::User));
-        let ContentBlock::Text { text } = &v[0].content[0] else { panic!() };
-        assert!(text.contains("[Earlier conversation summary]"), "{text}");
-        assert!(text.contains("we read the file"));
-        alternating_assert(&v);
+        let joined: String = v[0].content.iter().filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert!(joined.contains("[Earlier conversation summary]"), "{joined}");
+        assert!(joined.contains("we read the file"));
+        wire_invariants_assert(&v);
     }
 
     #[test]
