@@ -309,5 +309,4 @@ mod tests {
         buf.move_home(); // Should go to start of "line2"
         assert_eq!(buf.cursor(), 6);
     }
-
 }

@@ -24,7 +24,10 @@ pub fn cell_width(symbol: &str) -> u16 {
     if symbol.len() == 1 {
         1
     } else {
-        let extra = symbol.chars().filter(|c| matches!(*c, DAKUTEN | HANDAKUTEN)).count() as u16;
+        let extra = symbol
+            .chars()
+            .filter(|c| matches!(*c, DAKUTEN | HANDAKUTEN))
+            .count() as u16;
         (symbol.width() as u16).saturating_add(extra)
     }
 }
@@ -68,8 +71,7 @@ fn wrap_one(g: &[(String, u16, Style)], maxw: u16, out: &mut Vec<Line>) {
         }
         let word_found = non_ws_prev && is_ws;
         // trim=false: a pending word+whitespace that overflows on its own flushes.
-        let untrimmed_overflow =
-            pending_line.is_empty() && word_w + ws_w + w > maxw;
+        let untrimmed_overflow = pending_line.is_empty() && word_w + ws_w + w > maxw;
         if word_found || untrimmed_overflow {
             // trim=false: whitespace always joins the line.
             pending_line.append(&mut pending_ws);
@@ -223,8 +225,16 @@ fn row_range(sel: &Selection, row: usize, row_width: usize) -> Option<(usize, us
     if row < a.line || row > b.line {
         return None;
     }
-    let start = if row == a.line { a.col.min(row_width) } else { 0 };
-    let end = if row == b.line { b.col.min(row_width) } else { row_width };
+    let start = if row == a.line {
+        a.col.min(row_width)
+    } else {
+        0
+    };
+    let end = if row == b.line {
+        b.col.min(row_width)
+    } else {
+        row_width
+    };
     (start < end).then_some((start, end))
 }
 
@@ -352,8 +362,16 @@ fn base64_encode(data: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -375,8 +393,8 @@ mod tests {
     /// and read back the buffer rows. `wrap_styled` must match this exactly —
     /// including ratatui's quirks — because the transcript renders with it today.
     fn ratatui_wrap_rows(text: &str, width: u16) -> Vec<String> {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let height = 64;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -443,13 +461,18 @@ mod tests {
             for width in 3..18 {
                 let rows = wrap_styled(&[plain(text)], width);
                 assert!(
-                    rows.iter().all(|r| (row_width_cells(r) as u16) <= width as u16),
+                    rows.iter()
+                        .all(|r| (row_width_cells(r) as u16) <= width as u16),
                     "row wider than {width} for {text:?}: {:?}",
                     row_texts(rows.clone())
                 );
                 // 非空白字符一个不许丢；空白字符允许落在换行点被吞（ratatui
                 // 既有行为：换行点后的空白不进下一行，屏幕上也不可见）。
-                let squeezed: String = row_texts(rows).concat().chars().filter(|c| !c.is_whitespace()).collect();
+                let squeezed: String = row_texts(rows)
+                    .concat()
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
                 let expected: String = text.chars().filter(|c| !c.is_whitespace()).collect();
                 assert_eq!(squeezed, expected, "chars lost @ {width} for {text:?}");
             }
@@ -521,14 +544,32 @@ mod tests {
     fn styles_survive_wrapping() {
         let line = Line::from(vec![
             Span::styled("red ", Style::default().fg(ratatui::style::Color::Red)),
-            Span::styled("blue words", Style::default().fg(ratatui::style::Color::Blue)),
+            Span::styled(
+                "blue words",
+                Style::default().fg(ratatui::style::Color::Blue),
+            ),
         ]);
         let rows = wrap_styled(&[line], 9);
         assert_eq!(rows.len(), 2);
         // row0 "red blue" 含两色；row1 "words" 只有 blue（跨行处红色已结束）。
-        assert!(rows[0].spans.iter().any(|s| s.style.fg == Some(ratatui::style::Color::Red)));
-        assert!(rows[0].spans.iter().any(|s| s.style.fg == Some(ratatui::style::Color::Blue)));
-        assert!(rows[1].spans.iter().all(|s| s.style.fg == Some(ratatui::style::Color::Blue)));
+        assert!(
+            rows[0]
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(ratatui::style::Color::Red))
+        );
+        assert!(
+            rows[0]
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(ratatui::style::Color::Blue))
+        );
+        assert!(
+            rows[1]
+                .spans
+                .iter()
+                .all(|s| s.style.fg == Some(ratatui::style::Color::Blue))
+        );
     }
 
     #[test]
@@ -579,12 +620,22 @@ mod tests {
             anchor: Pos { line: 0, col: 0 },
             focus: Pos { line: 0, col: 5 },
         };
-        highlight(&mut rows, &sel, Style::default().add_modifier(Modifier::REVERSED));
+        highlight(
+            &mut rows,
+            &sel,
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
         let reversed = |s: &Span| s.style.add_modifier == Modifier::REVERSED;
         let text: String = rows[0]
             .spans
             .iter()
-            .map(|s| if reversed(s) { s.content.to_uppercase() } else { s.content.to_string() })
+            .map(|s| {
+                if reversed(s) {
+                    s.content.to_uppercase()
+                } else {
+                    s.content.to_string()
+                }
+            })
             .collect();
         assert_eq!(text, "HELLO world");
     }
@@ -625,4 +676,3 @@ mod tests {
         assert_eq!(cell_width("あ"), 2);
     }
 }
-

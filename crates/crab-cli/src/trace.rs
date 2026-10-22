@@ -205,7 +205,10 @@ fn outcome_parts(outcome: &ObsOutcome) -> (bool, Option<String>) {
     match outcome {
         ObsOutcome::Ok => (true, None),
         ObsOutcome::Aborted => (false, Some("aborted".to_string())),
-        ObsOutcome::Error(e) => (false, Some(format!("error: {}", crate::width::truncate_to_width(e, 40)))),
+        ObsOutcome::Error(e) => (
+            false,
+            Some(format!("error: {}", crate::width::truncate_to_width(e, 40))),
+        ),
     }
 }
 
@@ -222,7 +225,12 @@ pub fn render(traces: &[Trace]) -> String {
     let mut out = String::new();
     for t in traces {
         let status = if t.complete { "" } else { " · INCOMPLETE" };
-        out.push_str(&format!("run {} · {} spans{}\n", t.run_id, t.spans.len(), status));
+        out.push_str(&format!(
+            "run {} · {} spans{}\n",
+            t.run_id,
+            t.spans.len(),
+            status
+        ));
         for (i, s) in t.spans.iter().enumerate() {
             let last = i + 1 == t.spans.len();
             let branch = if last { "└──" } else { "├──" };
@@ -274,7 +282,9 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text { text: "let me read".into() },
+                ContentBlock::Text {
+                    text: "let me read".into(),
+                },
                 ContentBlock::ToolUse {
                     id: "c1".into(),
                     name: "read".into(),
@@ -287,7 +297,11 @@ mod tests {
     fn obs(id: u64, body: ObsBody) -> SessionEntry {
         SessionEntry::Obs {
             id,
-            event: ObsEvent { run_id: 0, ts: 1000 + id, body },
+            event: ObsEvent {
+                run_id: 0,
+                ts: 1000 + id,
+                body,
+            },
         }
     }
 
@@ -309,34 +323,53 @@ mod tests {
     #[test]
     fn v2_run_builds_spans_and_joins_tool_args() {
         let entries = vec![
-            SessionEntry::Meta { format_version: 2, created: "x".into() },
+            SessionEntry::Meta {
+                format_version: 2,
+                created: "x".into(),
+            },
             // Real ordering: the agent emits TurnStart before recording the user message.
             obs(2, ObsBody::TurnStart),
             msg_entry(1, text_msg(Role::User, "hi")),
             msg_entry(3, tool_use_msg()),
-            obs(4, ObsBody::ToolCall {
-                tool: "read".into(),
-                call_seq: 0,
-                args_digest: crab_core::obs::digest(&serde_json::json!({"path": "a.rs"})),
-                result_digest: crab_core::obs::digest(&serde_json::Value::String("file body".into())),
-                bytes_in: 15,
-                bytes_out: 9,
-                duration_ms: 3,
-                outcome: ObsOutcome::Ok,
-            }),
-            obs(5, ObsBody::LlmCall {
-                provider: "mock".into(),
-                model: "mock".into(),
-                duration_ms: 9,
-                usage: Some(LlmUsage { prompt: 100, completion: 10, cache_read: 0, cache_write: 0 }),
-                outcome: ObsOutcome::Ok,
-            }),
-            obs(6, ObsBody::TurnEnd {
-                stop_reason: crab_core::types::StopReason::EndTurn,
-                interrupted: false,
-                llm_calls: 1,
-                tool_calls: 1,
-            }),
+            obs(
+                4,
+                ObsBody::ToolCall {
+                    tool: "read".into(),
+                    call_seq: 0,
+                    args_digest: crab_core::obs::digest(&serde_json::json!({"path": "a.rs"})),
+                    result_digest: crab_core::obs::digest(&serde_json::Value::String(
+                        "file body".into(),
+                    )),
+                    bytes_in: 15,
+                    bytes_out: 9,
+                    duration_ms: 3,
+                    outcome: ObsOutcome::Ok,
+                },
+            ),
+            obs(
+                5,
+                ObsBody::LlmCall {
+                    provider: "mock".into(),
+                    model: "mock".into(),
+                    duration_ms: 9,
+                    usage: Some(LlmUsage {
+                        prompt: 100,
+                        completion: 10,
+                        cache_read: 0,
+                        cache_write: 0,
+                    }),
+                    outcome: ObsOutcome::Ok,
+                },
+            ),
+            obs(
+                6,
+                ObsBody::TurnEnd {
+                    stop_reason: crab_core::types::StopReason::EndTurn,
+                    interrupted: false,
+                    llm_calls: 1,
+                    tool_calls: 1,
+                },
+            ),
         ];
         let traces = build_traces(&entries);
         assert_eq!(traces.len(), 1);
@@ -344,8 +377,16 @@ mod tests {
         assert!(t.complete);
         assert_eq!(t.spans.len(), 2);
         assert_eq!(t.spans[0].label, "tool read");
-        assert!(t.spans[0].detail.contains("read"), "got {}", t.spans[0].detail);
-        assert!(t.spans[0].detail.contains("\"path\":\"a.rs\""), "got {}", t.spans[0].detail);
+        assert!(
+            t.spans[0].detail.contains("read"),
+            "got {}",
+            t.spans[0].detail
+        );
+        assert!(
+            t.spans[0].detail.contains("\"path\":\"a.rs\""),
+            "got {}",
+            t.spans[0].detail
+        );
         assert_eq!(t.spans[1].usage.unwrap().prompt, 100);
     }
 
@@ -354,25 +395,35 @@ mod tests {
         let entries = vec![
             obs(0, ObsBody::TurnStart),
             msg_entry(1, tool_use_msg()),
-            obs(2, ObsBody::ToolCall {
-                tool: "read".into(),
-                call_seq: 0,
-                args_digest: "deadbeef".into(),
-                result_digest: "x".into(),
-                bytes_in: 0,
-                bytes_out: 0,
-                duration_ms: 1,
-                outcome: ObsOutcome::Ok,
-            }),
-            obs(3, ObsBody::TurnEnd {
-                stop_reason: crab_core::types::StopReason::EndTurn,
-                interrupted: false,
-                llm_calls: 0,
-                tool_calls: 1,
-            }),
+            obs(
+                2,
+                ObsBody::ToolCall {
+                    tool: "read".into(),
+                    call_seq: 0,
+                    args_digest: "deadbeef".into(),
+                    result_digest: "x".into(),
+                    bytes_in: 0,
+                    bytes_out: 0,
+                    duration_ms: 1,
+                    outcome: ObsOutcome::Ok,
+                },
+            ),
+            obs(
+                3,
+                ObsBody::TurnEnd {
+                    stop_reason: crab_core::types::StopReason::EndTurn,
+                    interrupted: false,
+                    llm_calls: 0,
+                    tool_calls: 1,
+                },
+            ),
         ];
         let traces = build_traces(&entries);
-        assert!(traces[0].spans[0].detail.contains("join-mismatch"), "{}", traces[0].spans[0].detail);
+        assert!(
+            traces[0].spans[0].detail.contains("join-mismatch"),
+            "{}",
+            traces[0].spans[0].detail
+        );
     }
 
     #[test]
@@ -400,22 +451,28 @@ mod tests {
     fn render_marks_errors() {
         let entries = vec![
             obs(0, ObsBody::TurnStart),
-            obs(1, ObsBody::ToolCall {
-                tool: "bash".into(),
-                call_seq: 0,
-                args_digest: "x".into(),
-                result_digest: "x".into(),
-                bytes_in: 0,
-                bytes_out: 0,
-                duration_ms: 1,
-                outcome: ObsOutcome::Error("boom".into()),
-            }),
-            obs(2, ObsBody::TurnEnd {
-                stop_reason: crab_core::types::StopReason::EndTurn,
-                interrupted: false,
-                llm_calls: 0,
-                tool_calls: 1,
-            }),
+            obs(
+                1,
+                ObsBody::ToolCall {
+                    tool: "bash".into(),
+                    call_seq: 0,
+                    args_digest: "x".into(),
+                    result_digest: "x".into(),
+                    bytes_in: 0,
+                    bytes_out: 0,
+                    duration_ms: 1,
+                    outcome: ObsOutcome::Error("boom".into()),
+                },
+            ),
+            obs(
+                2,
+                ObsBody::TurnEnd {
+                    stop_reason: crab_core::types::StopReason::EndTurn,
+                    interrupted: false,
+                    llm_calls: 0,
+                    tool_calls: 1,
+                },
+            ),
         ];
         let out = render(&build_traces(&entries));
         assert!(out.contains('✗'), "{out}");

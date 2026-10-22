@@ -86,8 +86,7 @@ fn spawn_metrics_sink(
             eprintln!("[crab] metrics: opening {db_path:?} failed; sink disabled");
             return;
         };
-        let mut acc =
-            metrics::RunAccumulator::new(metrics::load_pricing(), provider, model);
+        let mut acc = metrics::RunAccumulator::new(metrics::load_pricing(), provider, model);
         while let Ok(ev) = rx.recv().await {
             if let Some(mut row) = acc.on_event(&ev) {
                 row.session_id = session_id.clone();

@@ -176,7 +176,10 @@ pub enum Picker {
     Model(ListPicker),
     /// Skill display items are "name — description" (description truncated);
     /// `names` holds the plain names, indexed like `list`, for the Enter action.
-    Skill { list: ListPicker, names: Vec<String> },
+    Skill {
+        list: ListPicker,
+        names: Vec<String>,
+    },
 }
 
 impl Picker {
@@ -215,9 +218,7 @@ pub fn visible_window(selected: usize, len: usize, capacity: usize) -> usize {
     if len <= capacity {
         return 0;
     }
-    selected
-        .saturating_sub(capacity / 2)
-        .min(len - capacity)
+    selected.saturating_sub(capacity / 2).min(len - capacity)
 }
 
 /// A parsed slash command.
@@ -358,9 +359,8 @@ pub fn parse_slash(text: &str) -> Option<SlashCommand> {
 /// Build the user message that injects a skill's instructions. `args` (may be
 /// empty) is appended as the user request after the skill block.
 pub fn skill_message(skill: &crab_core::skills::Skill, args: &str) -> String {
-    let content = std::fs::read_to_string(&skill.skill_md).unwrap_or_else(|e| {
-        format!("(failed to read {}: {e})", skill.skill_md.display())
-    });
+    let content = std::fs::read_to_string(&skill.skill_md)
+        .unwrap_or_else(|e| format!("(failed to read {}: {e})", skill.skill_md.display()));
     let mut msg = format!(
         "<Skill instructions: {} ({})>\n{}\n</Skill instructions>",
         skill.name,
@@ -570,9 +570,7 @@ impl TuiState {
                             // Fill the matching Tool bubble (live path: ToolCallFinished).
                             for bubble in self.bubbles.iter_mut().rev() {
                                 if let Bubble::Tool {
-                                    id: bid,
-                                    result: r,
-                                    ..
+                                    id: bid, result: r, ..
                                 } = bubble
                                     && bid == tool_use_id
                                 {
@@ -604,7 +602,10 @@ impl TuiState {
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !text.is_empty() {
-                    self.bubbles.push(Bubble::Assistant { text, complete: true });
+                    self.bubbles.push(Bubble::Assistant {
+                        text,
+                        complete: true,
+                    });
                 }
                 // Tool bubbles come after the text (live order: text streams,
                 // then ToolCallStarted fires per tool_use block).
@@ -632,7 +633,10 @@ impl TuiState {
     pub fn select_begin(&mut self, col: u16, row: u16) {
         match self.select_grid.as_ref().and_then(|g| g.hit(col, row)) {
             Some(pos) => {
-                self.selection = Some(super::select::Selection { anchor: pos, focus: pos });
+                self.selection = Some(super::select::Selection {
+                    anchor: pos,
+                    focus: pos,
+                });
             }
             None => self.selection = None,
         }
@@ -640,9 +644,10 @@ impl TuiState {
 
     /// Mouse drag while pressed: extend the selection.
     pub fn select_update(&mut self, col: u16, row: u16) {
-        if let (Some(sel), Some(pos)) =
-            (&mut self.selection, self.select_grid.as_ref().and_then(|g| g.hit(col, row)))
-        {
+        if let (Some(sel), Some(pos)) = (
+            &mut self.selection,
+            self.select_grid.as_ref().and_then(|g| g.hit(col, row)),
+        ) {
             sel.focus = pos;
         }
     }
@@ -718,17 +723,15 @@ impl TuiState {
         }
         let kind = hint_kind(&input);
         let matches = self.hint_completions(&kind);
-        let done_no_arg = matches!(kind, HintKind::Command(_))
-            && matches.len() == 1
-            && {
-                // 完整输入了规范形且无参：隐藏提示，Enter 直接执行。
-                // （别名如 /q 保留提示，便于补全为规范形 /quit。）
-                let rest = input.trim_start_matches('/');
-                let cmd = Self::slash_matches_for(kind.key().1);
-                !cmd[0].completion.ends_with(' ')
-                    && !cmd[0].completion.ends_with(':')
-                    && cmd[0].names.first() == Some(&rest)
-            };
+        let done_no_arg = matches!(kind, HintKind::Command(_)) && matches.len() == 1 && {
+            // 完整输入了规范形且无参：隐藏提示，Enter 直接执行。
+            // （别名如 /q 保留提示，便于补全为规范形 /quit。）
+            let rest = input.trim_start_matches('/');
+            let cmd = Self::slash_matches_for(kind.key().1);
+            !cmd[0].completion.ends_with(' ')
+                && !cmd[0].completion.ends_with(':')
+                && cmd[0].names.first() == Some(&rest)
+        };
         if matches.is_empty() || done_no_arg {
             self.slash_hint = None;
             return;
@@ -737,12 +740,7 @@ impl TuiState {
             Some(h) if h.kind.key() == kind.key() => {
                 h.selected = h.selected.min(matches.len().saturating_sub(1));
             }
-            _ => {
-                self.slash_hint = Some(SlashHint {
-                    kind,
-                    selected: 0,
-                })
-            }
+            _ => self.slash_hint = Some(SlashHint { kind, selected: 0 }),
         }
     }
 
@@ -770,7 +768,9 @@ impl TuiState {
     /// was nothing to complete — or the completion equals the input, in which
     /// case the Enter should fall through and execute the command.
     pub fn slash_hint_complete(&mut self) -> bool {
-        let Some(h) = &self.slash_hint else { return false };
+        let Some(h) = &self.slash_hint else {
+            return false;
+        };
         let completions = self.hint_completions(&h.kind);
         let Some(completion) = completions.get(h.selected) else {
             self.slash_hint = None;
@@ -837,8 +837,9 @@ impl TuiState {
                 shed_tool_results,
                 turns_affected,
             } => {
-                let mut msg =
-                    format!("compacted {turns_affected} turns, shed {shed_tool_results} tool results");
+                let mut msg = format!(
+                    "compacted {turns_affected} turns, shed {shed_tool_results} tool results"
+                );
                 if matches!(strategy, crab_core::obs::CompactionStrategy::Summarize) {
                     msg.push_str(" + summary");
                 }
@@ -1049,7 +1050,10 @@ impl Bubble {
 mod tests {
     use super::*;
 
-    fn msg(role: crab_core::types::Role, content: Vec<crab_core::types::ContentBlock>) -> crab_core::types::Message {
+    fn msg(
+        role: crab_core::types::Role,
+        content: Vec<crab_core::types::ContentBlock>,
+    ) -> crab_core::types::Message {
         crab_core::types::Message { role, content }
     }
 
@@ -1058,7 +1062,10 @@ mod tests {
         // "/" alone: full catalog.
         assert_eq!(TuiState::slash_matches("/").len(), SLASH_COMMANDS.len());
         // 前缀过滤：/m → model + models。
-        let m: Vec<_> = TuiState::slash_matches("/m").iter().map(|c| c.names[0]).collect();
+        let m: Vec<_> = TuiState::slash_matches("/m")
+            .iter()
+            .map(|c| c.names[0])
+            .collect();
         assert_eq!(m, vec!["model", "models"]);
         // 别名匹配：/q → quit。
         assert_eq!(TuiState::slash_matches("/q")[0].names[0], "quit");
@@ -1152,7 +1159,10 @@ mod tests {
         s.sync_slash_hint();
         assert!(matches!(
             s.slash_hint,
-            Some(SlashHint { kind: HintKind::ModelArg(_), .. })
+            Some(SlashHint {
+                kind: HintKind::ModelArg(_),
+                ..
+            })
         ));
         assert!(s.slash_hint_complete());
         assert_eq!(s.input.text(), "/model deepseek");
@@ -1171,7 +1181,10 @@ mod tests {
         s.sync_slash_hint();
         assert!(matches!(
             s.slash_hint,
-            Some(SlashHint { kind: HintKind::ModelArg(_), .. })
+            Some(SlashHint {
+                kind: HintKind::ModelArg(_),
+                ..
+            })
         ));
         // 没有配置任何 model/skill 时不弹参数提示。
         let mut bare = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
@@ -1201,8 +1214,16 @@ mod tests {
     fn replay_rebuilds_user_and_assistant_bubbles() {
         use crab_core::types::{ContentBlock, Role};
         let mut state = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
-        state.replay_message(&msg(Role::User, vec![ContentBlock::Text { text: "hi".into() }]));
-        state.replay_message(&msg(Role::Assistant, vec![ContentBlock::Text { text: "hello".into() }]));
+        state.replay_message(&msg(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        ));
+        state.replay_message(&msg(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        ));
         assert_eq!(state.bubbles.len(), 2);
         assert!(matches!(&state.bubbles[0], Bubble::User(t) if t == "hi"));
         assert!(
@@ -1216,11 +1237,18 @@ mod tests {
     fn replay_pairs_tool_use_with_result() {
         use crab_core::types::{ContentBlock, Role};
         let mut state = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
-        state.replay_message(&msg(Role::User, vec![ContentBlock::Text { text: "count".into() }]));
+        state.replay_message(&msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "count".into(),
+            }],
+        ));
         state.replay_message(&msg(
             Role::Assistant,
             vec![
-                ContentBlock::Text { text: "counting".into() },
+                ContentBlock::Text {
+                    text: "counting".into(),
+                },
                 ContentBlock::ToolUse {
                     id: "c1".into(),
                     name: "bash".into(),
@@ -1240,7 +1268,9 @@ mod tests {
         assert_eq!(state.bubbles.len(), 3, "{:?}", state.bubbles);
         assert!(matches!(&state.bubbles[1], Bubble::Assistant { text, .. } if text == "counting"));
         match &state.bubbles[2] {
-            Bubble::Tool { name, args, result, .. } => {
+            Bubble::Tool {
+                name, args, result, ..
+            } => {
                 assert_eq!(name, "bash");
                 assert!(args.contains("bash"), "{args}");
                 let r = result.as_ref().expect("result filled");
@@ -1498,7 +1528,10 @@ mod tests {
         );
         assert_eq!(
             parse_slash("/skill:tdd fix the parser"),
-            Some(SlashCommand::Skill("tdd".into(), Some("fix the parser".into())))
+            Some(SlashCommand::Skill(
+                "tdd".into(),
+                Some("fix the parser".into())
+            ))
         );
         assert_eq!(
             parse_slash("/skill:"),

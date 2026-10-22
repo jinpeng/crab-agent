@@ -142,7 +142,10 @@ mod tests {
         let a = serde_json::json!({"path": "x", "limit": 1});
         let b = serde_json::json!({"limit": 1, "path": "x"});
         assert_eq!(digest(&a), digest(&b));
-        assert_ne!(digest(&a), digest(&serde_json::json!({"path": "y", "limit": 1})));
+        assert_ne!(
+            digest(&a),
+            digest(&serde_json::json!({"path": "y", "limit": 1}))
+        );
         assert_eq!(digest(&a).len(), 8);
     }
 }

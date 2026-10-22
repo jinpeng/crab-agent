@@ -47,7 +47,11 @@ impl Session {
             format_version: SESSION_FORMAT_VERSION,
             created,
         };
-        writeln!(f, "{}", serde_json::to_string(&meta).map_err(std::io::Error::other)?)?;
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&meta).map_err(std::io::Error::other)?
+        )?;
         Ok(Self {
             path,
             entries: vec![meta],
@@ -92,7 +96,10 @@ impl Session {
                     format!("{}:{}: {}", path.display(), n + 1, e),
                 )
             })?;
-            if let SessionEntry::Meta { format_version: v, .. } = &entry {
+            if let SessionEntry::Meta {
+                format_version: v, ..
+            } = &entry
+            {
                 format_version = *v;
             }
             max_id = Some(max_id.map_or(entry.id(), |m: EntryId| m.max(entry.id())));
@@ -128,14 +135,10 @@ impl Session {
         let id = self.next_id;
         // Chain messages among themselves: meta/obs entries never join the
         // parent chain, so parent semantics match v1 files.
-        let parent_id = self
-            .entries
-            .iter()
-            .rev()
-            .find_map(|e| match e {
-                SessionEntry::Message { id, .. } => Some(*id),
-                _ => None,
-            });
+        let parent_id = self.entries.iter().rev().find_map(|e| match e {
+            SessionEntry::Message { id, .. } => Some(*id),
+            _ => None,
+        });
         let entry = SessionEntry::Message {
             id,
             parent_id,
@@ -280,8 +283,7 @@ mod tests {
         })
         .unwrap();
         let text = std::fs::read_to_string(s.path()).unwrap();
-        let first: serde_json::Value =
-            serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(first["kind"], "meta");
         assert_eq!(first["format_version"], 2);
 

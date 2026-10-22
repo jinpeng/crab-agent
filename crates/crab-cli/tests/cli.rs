@@ -29,10 +29,7 @@ fn print_mode_runs_and_exits_zero() {
 fn print_mode_streams_text_to_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let mut cmd = crab_in(&dir);
-    cmd.arg("--provider")
-        .arg("mock")
-        .arg("--print")
-        .arg("hi");
+    cmd.arg("--provider").arg("mock").arg("--print").arg("hi");
     // mock provider emits "mock response"; real --print must stream it out
     cmd.assert()
         .success()

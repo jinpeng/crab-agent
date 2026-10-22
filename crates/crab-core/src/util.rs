@@ -17,7 +17,13 @@ pub fn canonical_json(v: &serde_json::Value) -> String {
             keys.sort();
             let inner: Vec<String> = keys
                 .into_iter()
-                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap(), canonical_json(&m[k])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap(),
+                        canonical_json(&m[k])
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(","))
         }
@@ -36,6 +42,9 @@ mod tests {
     #[test]
     fn sorts_nested_object_keys() {
         let v = serde_json::json!({"b": {"y": 1, "x": 2}, "a": [true, null]});
-        assert_eq!(canonical_json(&v), "{\"a\":[true,null],\"b\":{\"x\":2,\"y\":1}}");
+        assert_eq!(
+            canonical_json(&v),
+            "{\"a\":[true,null],\"b\":{\"x\":2,\"y\":1}}"
+        );
     }
 }

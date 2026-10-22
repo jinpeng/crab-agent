@@ -360,9 +360,7 @@ mod tests {
         };
         let sp = build_system_prompt(dir.path(), None, &[skill]);
         assert!(sp.contains("# Skills"));
-        assert!(
-            sp.contains("- tdd — Test-driven development. Use when test-first. (at ")
-        );
+        assert!(sp.contains("- tdd — Test-driven development. Use when test-first. (at "));
         assert!(sp.contains("tdd/SKILL.md)"));
     }
 

@@ -424,7 +424,9 @@ fn handle_event(
             MouseEventKind::Up(MouseButton::Left) => {
                 if let Some(text) = state.select_finish() {
                     match select::copy_text(&text) {
-                        Ok(how) => state.notice(format!("copied ({how}, {} chars)", text.chars().count())),
+                        Ok(how) => {
+                            state.notice(format!("copied ({how}, {} chars)", text.chars().count()))
+                        }
                         Err(e) => state.notice(format!("copy failed: {e}")),
                     }
                 }
@@ -633,7 +635,10 @@ fn dispatch_slash(
                 .iter()
                 .position(|n| state.provider_label.starts_with(n.as_str()))
                 .unwrap_or(0);
-            state.picker = Some(state::Picker::Model(state::ListPicker::new(model_names.to_vec(), current)));
+            state.picker = Some(state::Picker::Model(state::ListPicker::new(
+                model_names.to_vec(),
+                current,
+            )));
         }
         state::SlashCommand::Skill(name, args) => {
             if name.is_empty() {
@@ -656,9 +661,8 @@ fn dispatch_slash(
         }
         state::SlashCommand::PickSkill => match state::skill_picker(skills) {
             Some(picker) => state.picker = Some(picker),
-            None => state.notice(
-                "no skills found (looked in ~/.agents/skills and project .agents/skills)",
-            ),
+            None => state
+                .notice("no skills found (looked in ~/.agents/skills and project .agents/skills)"),
         },
         state::SlashCommand::Compact => {
             let _ = cmd_tx.blocking_send(UiCommand::Compact);

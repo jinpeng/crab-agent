@@ -156,9 +156,7 @@ impl Agent {
     fn compaction_due(&self) -> bool {
         self.config.auto_compact_threshold > 0.0
             && match (self.last_prompt, self.config.context_window) {
-                (Some(p), Some(w)) => {
-                    p as f64 > self.config.auto_compact_threshold * w as f64
-                }
+                (Some(p), Some(w)) => p as f64 > self.config.auto_compact_threshold * w as f64,
                 _ => false,
             }
     }
@@ -374,7 +372,13 @@ impl Agent {
         let mut tool_calls = 0u32;
         self.obs(run_id, crate::obs::ObsBody::TurnStart);
         let result = self
-            .loop_steps(user_input, run_id, &mut llm_calls, &mut tool_calls, stream_tx)
+            .loop_steps(
+                user_input,
+                run_id,
+                &mut llm_calls,
+                &mut tool_calls,
+                stream_tx,
+            )
             .await;
         let (stop_reason, interrupted) = match &result {
             Ok(r) => (*r, matches!(r, StopReason::Aborted)),
@@ -544,7 +548,9 @@ impl Agent {
                             tool: name.clone(),
                             call_seq: *tool_calls,
                             args_digest: crate::obs::digest(input),
-                            result_digest: crate::obs::digest(&serde_json::Value::String(content.clone())),
+                            result_digest: crate::obs::digest(&serde_json::Value::String(
+                                content.clone(),
+                            )),
                             bytes_in,
                             bytes_out: content.len() as u64,
                             duration_ms: tool_started.elapsed().as_millis() as u64,
@@ -696,7 +702,9 @@ pub(crate) mod tests {
     async fn summarize_compaction_shrinks_the_request_view_not_the_history() {
         let provider = MockProvider::new(vec![vec![
             StreamEvent::TextDelta("ok".into()),
-            StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
         ]]);
         let tools = ToolRegistry::new();
         let dir = tempfile::tempdir().unwrap();
@@ -712,10 +720,18 @@ pub(crate) mod tests {
         let mut agent = Agent::new(Box::new(provider), tools, session, config);
         // 预置 3 对历史（直接推入，绕过 run）
         for i in 0..3 {
-            agent.history.push(crate::types::Message { role: crate::types::Role::User,
-                content: vec![crate::types::ContentBlock::Text { text: format!("u{i}") }] });
-            agent.history.push(crate::types::Message { role: crate::types::Role::Assistant,
-                content: vec![crate::types::ContentBlock::Text { text: format!("a{i}") }] });
+            agent.history.push(crate::types::Message {
+                role: crate::types::Role::User,
+                content: vec![crate::types::ContentBlock::Text {
+                    text: format!("u{i}"),
+                }],
+            });
+            agent.history.push(crate::types::Message {
+                role: crate::types::Role::Assistant,
+                content: vec![crate::types::ContentBlock::Text {
+                    text: format!("a{i}"),
+                }],
+            });
         }
         agent.run("go".into()).await.unwrap();
         let calls = agent.provider_calls();
@@ -724,7 +740,11 @@ pub(crate) mod tests {
         assert_eq!(agent.history().len(), 8);
         // 请求在回复前构造：视图 = 1 条 summary + 5 条后缀 = 6 条；prefix 原文不在请求里
         assert_eq!(req.len(), 6, "{req:?}");
-        assert!(!req.iter().any(|m| m.content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text == "u0"))));
+        assert!(!req.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text == "u0"))
+        }));
         assert!(req[0].content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text.contains("[Earlier conversation summary]"))));
     }
 
@@ -734,9 +754,15 @@ pub(crate) mod tests {
     fn usage_turn(prompt_tokens: u32) -> Vec<StreamEvent> {
         vec![
             StreamEvent::TextDelta("working".into()),
-            StreamEvent::Usage { prompt_tokens, completion_tokens: 10,
-                cache_read_tokens: 0, cache_write_tokens: 0 },
-            StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+            StreamEvent::Usage {
+                prompt_tokens,
+                completion_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            StreamEvent::StreamEnd {
+                reason: StopReason::EndTurn,
+            },
         ]
     }
 
@@ -749,9 +775,12 @@ pub(crate) mod tests {
             usage_turn(60_000),
             usage_turn(80_000),
             usage_turn(100_000),
-            vec![ // 摘要调用（need_summary 成立时消费）
+            vec![
+                // 摘要调用（need_summary 成立时消费）
                 StreamEvent::TextDelta("summary of earlier work".into()),
-                StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+                StreamEvent::StreamEnd {
+                    reason: StopReason::EndTurn,
+                },
             ],
             usage_turn(50_000),
         ]);
@@ -765,12 +794,16 @@ pub(crate) mod tests {
         let session = crate::session::Session::create(dir.path()).unwrap();
         let mut agent = Agent::new(Box::new(provider), tools, session, config);
         agent.run("start".into()).await.unwrap(); // turn0: 60k
-        agent.run("more".into()).await.unwrap();  // turn1: 80k（不触发）
+        agent.run("more".into()).await.unwrap(); // turn1: 80k（不触发）
         agent.run("again".into()).await.unwrap(); // turn2: 100k
         agent.run("third".into()).await.unwrap(); // loop 顶：100k > 80k → 压缩
         let bodies = obs_bodies(&agent);
-        assert!(bodies.iter().any(|(_, b)| matches!(b, crate::obs::ObsBody::Compacted { .. })),
-            "expected a Compacted event, got {bodies:?}");
+        assert!(
+            bodies
+                .iter()
+                .any(|(_, b)| matches!(b, crate::obs::ObsBody::Compacted { .. })),
+            "expected a Compacted event, got {bodies:?}"
+        );
         assert_eq!(agent.compactions.len(), 1);
     }
 
@@ -783,9 +816,12 @@ pub(crate) mod tests {
             usage_turn(60_000),
             usage_turn(80_000),
             usage_turn(100_000),
-            vec![ // need_summary 成立时的摘要调用
+            vec![
+                // need_summary 成立时的摘要调用
                 StreamEvent::TextDelta("summary text".into()),
-                StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+                StreamEvent::StreamEnd {
+                    reason: StopReason::EndTurn,
+                },
             ],
         ]);
         let config = AgentConfig {
@@ -829,13 +865,23 @@ pub(crate) mod tests {
         struct Fail;
         #[async_trait::async_trait]
         impl crate::provider::Provider for Fail {
-            async fn complete(&self, _: &[crate::types::Message], _: &[serde_json::Value],
-                _: Option<&tokio::sync::broadcast::Sender<crate::stream::StreamEvent>>)
-                -> Result<crate::types::AssistantTurn, crate::provider::ProviderError> {
-                Err(crate::provider::ProviderError::Api { status: 500, body: "boom".into() })
+            async fn complete(
+                &self,
+                _: &[crate::types::Message],
+                _: &[serde_json::Value],
+                _: Option<&tokio::sync::broadcast::Sender<crate::stream::StreamEvent>>,
+            ) -> Result<crate::types::AssistantTurn, crate::provider::ProviderError> {
+                Err(crate::provider::ProviderError::Api {
+                    status: 500,
+                    body: "boom".into(),
+                })
             }
-            fn label(&self) -> &str { "fail" }
-            fn model(&self) -> &str { "fail" }
+            fn label(&self) -> &str {
+                "fail"
+            }
+            fn model(&self) -> &str {
+                "fail"
+            }
         }
         let provider = MockProvider::new(vec![
             usage_turn(60_000),
@@ -970,7 +1016,16 @@ pub(crate) mod tests {
             "got {bodies:?}"
         );
         match &bodies[2] {
-            (0, crate::obs::ObsBody::ToolCall { tool, call_seq, bytes_out, outcome, .. }) => {
+            (
+                0,
+                crate::obs::ObsBody::ToolCall {
+                    tool,
+                    call_seq,
+                    bytes_out,
+                    outcome,
+                    ..
+                },
+            ) => {
                 assert_eq!(tool, "noop");
                 assert_eq!(*call_seq, 0);
                 assert_eq!(*bytes_out, 4); // "done"
@@ -987,7 +1042,15 @@ pub(crate) mod tests {
             "got {bodies:?}"
         );
         match &bodies[4] {
-            (0, crate::obs::ObsBody::TurnEnd { stop_reason, interrupted, llm_calls, tool_calls }) => {
+            (
+                0,
+                crate::obs::ObsBody::TurnEnd {
+                    stop_reason,
+                    interrupted,
+                    llm_calls,
+                    tool_calls,
+                },
+            ) => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
                 assert!(!interrupted);
                 assert_eq!(*llm_calls, 2);
@@ -1015,9 +1078,13 @@ pub(crate) mod tests {
         assert_eq!(reason, StopReason::Aborted);
         let bodies = obs_bodies(&agent);
         assert!(
-            bodies.iter().any(
-                |(_, b)| matches!(b, crate::obs::ObsBody::TurnEnd { interrupted: true, .. })
-            ),
+            bodies.iter().any(|(_, b)| matches!(
+                b,
+                crate::obs::ObsBody::TurnEnd {
+                    interrupted: true,
+                    ..
+                }
+            )),
             "got {bodies:?}"
         );
     }
@@ -1054,9 +1121,13 @@ pub(crate) mod tests {
             "got {bodies:?}"
         );
         assert!(
-            bodies.iter().any(
-                |(_, b)| matches!(b, crate::obs::ObsBody::TurnEnd { interrupted: true, .. })
-            ),
+            bodies.iter().any(|(_, b)| matches!(
+                b,
+                crate::obs::ObsBody::TurnEnd {
+                    interrupted: true,
+                    ..
+                }
+            )),
             "got {bodies:?}"
         );
     }
@@ -1086,7 +1157,10 @@ pub(crate) mod tests {
                     b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "c1"))
             )
         });
-        assert!(answered, "dangling tool_use c1 must get a synthesized result");
+        assert!(
+            answered,
+            "dangling tool_use c1 must get a synthesized result"
+        );
 
         // And the wire form of the recorded history must be protocol-valid:
         // every role:"tool" message follows an assistant carrying tool_calls.

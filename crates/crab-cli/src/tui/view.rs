@@ -155,9 +155,7 @@ fn draw_slash_hint(f: &mut Frame, state: &TuiState, input_area: Rect) {
             }
             (
                 " commands (↑↓, Enter, Esc) ",
-                cmds.iter()
-                    .map(|c| Row::Cmd(c.names[0], c.desc))
-                    .collect(),
+                cmds.iter().map(|c| Row::Cmd(c.names[0], c.desc)).collect(),
             )
         }
         super::state::HintKind::ModelArg(prefix) => {
@@ -171,7 +169,10 @@ fn draw_slash_hint(f: &mut Frame, state: &TuiState, input_area: Rect) {
             }
             (
                 " models (↑↓, Enter, Esc) ",
-                names.into_iter().map(|n| Row::Arg(n.clone(), String::new())).collect(),
+                names
+                    .into_iter()
+                    .map(|n| Row::Arg(n.clone(), String::new()))
+                    .collect(),
             )
         }
         super::state::HintKind::SkillArg(prefix) => {
@@ -540,15 +541,20 @@ mod tests {
             "x".repeat(400)
         );
         let (tx, _rx) = std::sync::mpsc::channel::<crab_core::gate::Decision>();
-        s.begin_confirm(Prompt { tool: "bash", summary: long_cmd }, tx);
+        s.begin_confirm(
+            Prompt {
+                tool: "bash",
+                summary: long_cmd,
+            },
+            tx,
+        );
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| draw(f, &mut s)).unwrap();
         let buf = term.backend().buffer();
 
-        let row_text = |y: u16| -> String {
-            (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()
-        };
+        let row_text =
+            |y: u16| -> String { (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>() };
         let hint_row = (0..24).find(|y| row_text(*y).contains("[y]es"));
         let cmd_row = (0..24).find(|y| row_text(*y).contains("python3"));
         let hint = hint_row.expect("hint must be visible");
@@ -635,11 +641,21 @@ mod tests {
     fn bubbles_are_separated_by_a_blank_row() {
         let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
         s.bubbles.push(Bubble::User("first question".into()));
-        s.bubbles.push(Bubble::Assistant { text: "the answer".into(), complete: true });
+        s.bubbles.push(Bubble::Assistant {
+            text: "the answer".into(),
+            complete: true,
+        });
         let rows = render_frame(&mut s, 40, 12);
-        let pos_user = rows.iter().position(|r| r.contains("first question")).unwrap();
+        let pos_user = rows
+            .iter()
+            .position(|r| r.contains("first question"))
+            .unwrap();
         let pos_asst = rows.iter().position(|r| r.contains("the answer")).unwrap();
-        assert_eq!(pos_asst, pos_user + 2, "expected one blank row between bubbles: {rows:?}");
+        assert_eq!(
+            pos_asst,
+            pos_user + 2,
+            "expected one blank row between bubbles: {rows:?}"
+        );
         assert!(rows[pos_user + 1].trim().is_empty());
     }
 
@@ -658,8 +674,16 @@ mod tests {
         render_frame(&mut s, 20, 12);
         let grid = s.select_grid.clone().unwrap();
         let (row_alpha, row_delta) = {
-            let a = grid.rows.iter().position(|r| super::select::line_text(r).starts_with("alpha")).unwrap();
-            let b = grid.rows.iter().position(|r| super::select::line_text(r).starts_with("delta")).unwrap();
+            let a = grid
+                .rows
+                .iter()
+                .position(|r| super::select::line_text(r).starts_with("alpha"))
+                .unwrap();
+            let b = grid
+                .rows
+                .iter()
+                .position(|r| super::select::line_text(r).starts_with("delta"))
+                .unwrap();
             (a, b)
         };
         // 屏幕坐标：transcript 从 (0,0) 开始；选第一行 col 6 到第二行 col 5。
@@ -822,5 +846,3 @@ mod tests {
         assert!(centered.y < 30);
     }
 }
-
-

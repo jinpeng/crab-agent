@@ -272,18 +272,31 @@ mod tests {
             }],
         };
         let out = messages_to_openai(&m);
-        assert_eq!(out.len(), 1, "one assistant message, no naked role:tool: {out:?}");
+        assert_eq!(
+            out.len(),
+            1,
+            "one assistant message, no naked role:tool: {out:?}"
+        );
         assert_eq!(out[0]["role"], "assistant");
         assert!(
-            out[0]["content"].as_str().unwrap().contains("invalid tool arguments"),
+            out[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("invalid tool arguments"),
             "error detail preserved for the model to retry: {out:?}"
         );
     }
 
     #[test]
     fn empty_user_message_is_dropped() {
-        let m = Message { role: Role::User, content: vec![] };
-        assert!(messages_to_openai(&m).is_empty(), "empty messages add noise");
+        let m = Message {
+            role: Role::User,
+            content: vec![],
+        };
+        assert!(
+            messages_to_openai(&m).is_empty(),
+            "empty messages add noise"
+        );
     }
 
     #[tokio::test]

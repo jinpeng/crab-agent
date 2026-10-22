@@ -120,7 +120,9 @@ fn scan_dir(
                 .unwrap_or_default()
         });
         if !seen_names.insert(name.clone()) {
-            eprintln!("[crab] skill '{name}' in {label}: duplicate name (skipped, first found wins)");
+            eprintln!(
+                "[crab] skill '{name}' in {label}: duplicate name (skipped, first found wins)"
+            );
             continue;
         }
         skills.push(Skill {
@@ -151,18 +153,23 @@ mod tests {
     fn frontmatter_parses_name_and_description() {
         let (name, desc) = parse_frontmatter(TDD).unwrap();
         assert_eq!(name.as_deref(), Some("tdd"));
-        assert_eq!(desc.as_deref(), Some("Test-driven development. Use when test-first."));
+        assert_eq!(
+            desc.as_deref(),
+            Some("Test-driven development. Use when test-first.")
+        );
     }
 
     #[test]
     fn frontmatter_value_may_contain_colons() {
-        let (_, desc) = parse_frontmatter("---\ndescription: Use when: review, audit\n---\n").unwrap();
+        let (_, desc) =
+            parse_frontmatter("---\ndescription: Use when: review, audit\n---\n").unwrap();
         assert_eq!(desc.as_deref(), Some("Use when: review, audit"));
     }
 
     #[test]
     fn frontmatter_tolerates_crlf() {
-        let (name, desc) = parse_frontmatter("---\r\nname: tdd\r\ndescription: d\r\n---\r\nbody").unwrap();
+        let (name, desc) =
+            parse_frontmatter("---\r\nname: tdd\r\ndescription: d\r\n---\r\nbody").unwrap();
         assert_eq!(name.as_deref(), Some("tdd"));
         assert_eq!(desc.as_deref(), Some("d"));
     }
@@ -184,8 +191,14 @@ mod tests {
         assert_eq!(skills.len(), 2);
         assert_eq!(skills[0].name, "code-review"); // 按 name 排序
         assert_eq!(skills[1].name, "tdd");
-        assert_eq!(skills[1].description, "Test-driven development. Use when test-first.");
-        assert_eq!(skills[1].skill_md, home.path().join(".agents/skills/tdd/SKILL.md"));
+        assert_eq!(
+            skills[1].description,
+            "Test-driven development. Use when test-first."
+        );
+        assert_eq!(
+            skills[1].skill_md,
+            home.path().join(".agents/skills/tdd/SKILL.md")
+        );
     }
 
     #[test]
@@ -198,7 +211,11 @@ mod tests {
         // repo 根之上还有一层 skill——不应被发现
         write_skill(root.path(), ".agents/skills/outer", TDD);
         // 不写 name：默认取目录名 "inner"
-        write_skill(&repo, ".agents/skills/inner", "---\ndescription: inner skill\n---\n");
+        write_skill(
+            &repo,
+            ".agents/skills/inner",
+            "---\ndescription: inner skill\n---\n",
+        );
 
         let home = root.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -217,7 +234,11 @@ mod tests {
         let home = root.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         let skills = discover(&cwd, &home);
-        assert_eq!(skills.len(), 1, "no .git anywhere: must walk all the way up");
+        assert_eq!(
+            skills.len(),
+            1,
+            "no .git anywhere: must walk all the way up"
+        );
     }
 
     #[test]
@@ -238,8 +259,16 @@ mod tests {
     fn missing_description_is_skipped() {
         let home = tempfile::tempdir().unwrap();
         let proj = tempfile::tempdir().unwrap();
-        write_skill(proj.path(), ".agents/skills/nodef", "---\nname: nodef\n---\n");
-        write_skill(proj.path(), ".agents/skills/emptydef", "---\ndescription:\n---\n");
+        write_skill(
+            proj.path(),
+            ".agents/skills/nodef",
+            "---\nname: nodef\n---\n",
+        );
+        write_skill(
+            proj.path(),
+            ".agents/skills/emptydef",
+            "---\ndescription:\n---\n",
+        );
         write_skill(proj.path(), ".agents/skills/ok", REVIEW);
         assert_eq!(discover(proj.path(), home.path()).len(), 1);
     }
@@ -248,7 +277,11 @@ mod tests {
     fn name_defaults_to_directory_name() {
         let home = tempfile::tempdir().unwrap();
         let proj = tempfile::tempdir().unwrap();
-        write_skill(proj.path(), ".agents/skills/my-skill", "---\ndescription: d\n---\n");
+        write_skill(
+            proj.path(),
+            ".agents/skills/my-skill",
+            "---\ndescription: d\n---\n",
+        );
         let skills = discover(proj.path(), home.path());
         assert_eq!(skills[0].name, "my-skill");
     }
@@ -270,6 +303,10 @@ mod tests {
         write_skill(proj.path(), ".agents/skills/tdd", TDD);
         write_skill(proj.path(), ".agents/skills/tdd2", TDD); // 同名，不同目录
         let skills = discover(proj.path(), home.path());
-        assert_eq!(skills.len(), 1, "same name twice: first (sorted dir order) wins");
+        assert_eq!(
+            skills.len(),
+            1,
+            "same name twice: first (sorted dir order) wins"
+        );
     }
 }

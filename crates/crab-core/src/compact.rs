@@ -16,7 +16,11 @@ pub fn shed_message(m: &Message, tool_names: &HashMap<ToolCallId, String>) -> Me
         .content
         .iter()
         .map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 let name = tool_names
                     .get(tool_use_id)
                     .map(String::as_str)
@@ -39,7 +43,10 @@ pub fn shed_message(m: &Message, tool_names: &HashMap<ToolCallId, String>) -> Me
             other => other.clone(),
         })
         .collect();
-    Message { role: m.role, content }
+    Message {
+        role: m.role,
+        content,
+    }
 }
 
 /// 构造发送给 provider 的 history 视图（spec §3）。
@@ -62,7 +69,9 @@ pub fn view(history: &[Message], compactions: &[AppliedCompaction]) -> Vec<Messa
                     ContentBlock::Text {
                         text: "[Earlier conversation summary]".into(),
                     },
-                    ContentBlock::Text { text: summary.clone() },
+                    ContentBlock::Text {
+                        text: summary.clone(),
+                    },
                 ],
             });
             v.extend_from_slice(suffix);
@@ -98,7 +107,10 @@ pub fn resolve(entries: &[SessionEntry]) -> Vec<AppliedCompaction> {
                 crate::obs::ObsEvent {
                     body:
                         crate::obs::ObsBody::Compacted {
-                            up_to, strategy, summary, ..
+                            up_to,
+                            strategy,
+                            summary,
+                            ..
                         },
                     ..
                 },
@@ -166,7 +178,10 @@ fn text_bytes(msgs: &[Message]) -> usize {
 pub fn plan(history: &[Message], sizes: &[u64], budget: &Budget) -> Plan {
     let pairs = history.len() / 2;
     if pairs <= 2 {
-        return Plan { keep_from: 0, need_summary: false };
+        return Plan {
+            keep_from: 0,
+            need_summary: false,
+        };
     }
     // pair k 的估计尺寸：s_k = sizes[k+1] − sizes[k]；末 pair 重复前一 s。
     let pair_size = |k: usize| -> u64 {
@@ -207,7 +222,10 @@ pub fn plan(history: &[Message], sizes: &[u64], budget: &Budget) -> Plan {
         })
         .sum();
     let need_summary = (shed_prefix_bytes as f64 * r) as u64 > target && !prefix.is_empty();
-    Plan { keep_from: 2 * (pairs - m), need_summary }
+    Plan {
+        keep_from: 2 * (pairs - m),
+        need_summary,
+    }
 }
 
 #[cfg(test)]
@@ -216,10 +234,16 @@ mod tests {
     use crate::types::{ContentBlock, Message, Role};
 
     fn user(text: &str) -> Message {
-        Message { role: Role::User, content: vec![ContentBlock::Text { text: text.into() }] }
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
     }
     fn assistant(text: &str) -> Message {
-        Message { role: Role::Assistant, content: vec![ContentBlock::Text { text: text.into() }] }
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
     }
     fn assistant_tool_use(id: &str) -> Message {
         Message {
@@ -243,7 +267,9 @@ mod tests {
     }
     /// n 个 (user, assistant) 对
     fn history(n: usize) -> Vec<Message> {
-        (0..n).flat_map(|i| [user(&format!("u{i}")), assistant(&format!("a{i}"))]).collect()
+        (0..n)
+            .flat_map(|i| [user(&format!("u{i}")), assistant(&format!("a{i}"))])
+            .collect()
     }
     /// 单调递增的 prompt 序列（每次调用 +1000 tokens）
     fn sizes(n: usize) -> Vec<u64> {
@@ -251,7 +277,11 @@ mod tests {
     }
 
     fn budget(window: u64) -> Budget {
-        Budget { trigger: 0.8, keep: 0.4, window: Some(window) }
+        Budget {
+            trigger: 0.8,
+            keep: 0.4,
+            window: Some(window),
+        }
     }
 
     use std::collections::HashMap;
@@ -281,9 +311,11 @@ mod tests {
             for b in &m.content {
                 if let ContentBlock::ToolUse { id, .. } = b {
                     let next = &view[i + 1];
-                    assert!(next.content.iter().any(|r| matches!(r,
+                    assert!(
+                        next.content.iter().any(|r| matches!(r,
                         ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)),
-                        "tool_use {id} lost its result");
+                        "tool_use {id} lost its result"
+                    );
                 }
             }
         }
@@ -319,18 +351,28 @@ mod tests {
     #[test]
     fn summarize_view_replaces_prefix_with_single_user_message() {
         let h = sample_history();
-        let v = view(&h, &[AppliedCompaction {
-            keep_from: 4,
-            strategy: CompactionStrategy::Summarize,
-            summary: Some("we read the file".into()),
-        }]);
+        let v = view(
+            &h,
+            &[AppliedCompaction {
+                keep_from: 4,
+                strategy: CompactionStrategy::Summarize,
+                summary: Some("we read the file".into()),
+            }],
+        );
         assert_eq!(v.len(), h.len() - 4 + 1);
         assert!(matches!(&v[0].role, Role::User));
-        let joined: String = v[0].content.iter().filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
-        assert!(joined.contains("[Earlier conversation summary]"), "{joined}");
+        let joined: String = v[0]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            joined.contains("[Earlier conversation summary]"),
+            "{joined}"
+        );
         assert!(joined.contains("we read the file"));
         wire_invariants_assert(&v);
     }
@@ -342,7 +384,8 @@ mod tests {
         let id0 = s.append(user("u0")).unwrap();
         s.append(assistant("a0")).unwrap();
         s.append_obs(ObsEvent {
-            run_id: 0, ts: 1,
+            run_id: 0,
+            ts: 1,
             body: ObsBody::Compacted {
                 up_to: id0,
                 strategy: CompactionStrategy::Shed,
@@ -350,7 +393,8 @@ mod tests {
                 turns_affected: 1,
                 summary: None,
             },
-        }).unwrap();
+        })
+        .unwrap();
         s.append(user("u1")).unwrap();
         s.append(assistant("a1")).unwrap();
         let r = resolve(s.entries());
@@ -365,7 +409,12 @@ mod tests {
         names.insert("c1".to_string(), "read".to_string());
         let m = user_tool_result("c1", &"x".repeat(12_400));
         let shed = shed_message(&m, &names);
-        let ContentBlock::ToolResult { content, is_error, tool_use_id } = &shed.content[0] else {
+        let ContentBlock::ToolResult {
+            content,
+            is_error,
+            tool_use_id,
+        } = &shed.content[0]
+        else {
             panic!("block kind changed");
         };
         assert_eq!(tool_use_id, "c1");
@@ -460,7 +509,15 @@ mod tests {
     #[test]
     fn byte_fallback_when_window_unknown() {
         let h = history(6); // "u0"/"a0"…每条 ~2-3 字节
-        let p = plan(&h, &sizes(6), &Budget { trigger: 0.8, keep: 0.4, window: None });
+        let p = plan(
+            &h,
+            &sizes(6),
+            &Budget {
+                trigger: 0.8,
+                keep: 0.4,
+                window: None,
+            },
+        );
         // 确定性即可：不 panic、keep_from 落在边界
         assert!(p.keep_from.is_multiple_of(2));
     }

@@ -993,7 +993,10 @@ while True:
         std::fs::write(&script, SLEEPER_PY).unwrap();
         let pidfile = dir.path().join("child.pid");
         let mut env = std::collections::HashMap::new();
-        env.insert("PIDFILE".to_string(), pidfile.to_string_lossy().into_owned());
+        env.insert(
+            "PIDFILE".to_string(),
+            pidfile.to_string_lossy().into_owned(),
+        );
         let cfg = McpServerConfig {
             command: "python3".into(),
             args: vec![script.to_string_lossy().into_owned()],
@@ -1006,7 +1009,10 @@ while True:
     fn child_pid(pidfile: &str) -> Option<String> {
         (0..50).find_map(|_| {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            std::fs::read_to_string(pidfile).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            std::fs::read_to_string(pidfile)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         })
     }
 

@@ -83,8 +83,13 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// RFC3339 subset `YYYY-MM-DDTHH:MM:SS(Z|±HH:MM)` → epoch millis. None if invalid.
 fn parse_rfc3339(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() < 20 || b.get(4) != Some(&b'-') || b.get(7) != Some(&b'-') || b.get(10) != Some(&b'T')
-        || b.get(13) != Some(&b':') || b.get(16) != Some(&b':') {
+    if b.len() < 20
+        || b.get(4) != Some(&b'-')
+        || b.get(7) != Some(&b'-')
+        || b.get(10) != Some(&b'T')
+        || b.get(13) != Some(&b':')
+        || b.get(16) != Some(&b':')
+    {
         return None;
     }
     let num = |r: std::ops::Range<usize>| s.get(r).and_then(|x| x.parse::<i64>().ok());
@@ -197,7 +202,10 @@ fn version_from_toml(v: &toml::Value, warn: &str) -> Option<Version> {
             let (Some(start_min), Some(end_min), Some(tz_min)) =
                 (parse_hhmm(&w.start), parse_hhmm(&w.end), parse_tz(&w.tz))
             else {
-                eprintln!("[crab] pricing: {warn}: bad window {:?}-{:?} tz {:?}, skipped", w.start, w.end, w.tz);
+                eprintln!(
+                    "[crab] pricing: {warn}: bad window {:?}-{:?} tz {:?}, skipped",
+                    w.start, w.end, w.tz
+                );
                 return None;
             };
             Some(Window {
@@ -209,7 +217,11 @@ fn version_from_toml(v: &toml::Value, warn: &str) -> Option<Version> {
             })
         })
         .collect();
-    Some(Version { since, base: vt.rates, windows })
+    Some(Version {
+        since,
+        base: vt.rates,
+        windows,
+    })
 }
 
 pub fn parse_pricing(toml_str: &str) -> Pricing {
@@ -224,7 +236,10 @@ pub fn parse_pricing(toml_str: &str) -> Pricing {
         }
     };
     let Some(models) = value.get("models").and_then(|m| m.as_table()) else {
-        eprintln!("[crab] pricing: no [models] table in {:?}", &toml_str[..toml_str.len().min(60)]);
+        eprintln!(
+            "[crab] pricing: no [models] table in {:?}",
+            &toml_str[..toml_str.len().min(60)]
+        );
         return pricing;
     };
     for (name, model_value) in models {
@@ -274,7 +289,10 @@ fn load_pricing_from(user_file: Option<&Path>) -> Pricing {
     if overlay.models.is_empty() && text.contains("[models") {
         // A comments-only file is a valid "no overrides" choice; warn only
         // when the user clearly tried to declare models but none parsed.
-        eprintln!("[crab] pricing: {} has [models] but none parsed (bad since/window syntax?)", path.display());
+        eprintln!(
+            "[crab] pricing: {} has [models] but none parsed (bad since/window syntax?)",
+            path.display()
+        );
     }
     for (name, user_versions) in overlay.models {
         let entry = pricing.models.entry(name).or_default();
@@ -295,10 +313,18 @@ fn load_pricing_from(user_file: Option<&Path>) -> Pricing {
 }
 
 fn merge_rates(dst: &mut Rates, src: &Rates) {
-    if src.input != 0.0 { dst.input = src.input; }
-    if src.output != 0.0 { dst.output = src.output; }
-    if src.cache_read != 0.0 { dst.cache_read = src.cache_read; }
-    if src.cache_write != 0.0 { dst.cache_write = src.cache_write; }
+    if src.input != 0.0 {
+        dst.input = src.input;
+    }
+    if src.output != 0.0 {
+        dst.output = src.output;
+    }
+    if src.cache_read != 0.0 {
+        dst.cache_read = src.cache_read;
+    }
+    if src.cache_write != 0.0 {
+        dst.cache_write = src.cache_write;
+    }
 }
 
 /// Cost in USD for one usage AT THE CALL TIME `ts_ms`: the last version with
@@ -375,7 +401,9 @@ pub fn session_cost(entries: &[crab_core::session::SessionEntry]) -> Option<f64>
                     ts,
                     body:
                         crab_core::obs::ObsBody::LlmCall {
-                            model, usage: Some(u), ..
+                            model,
+                            usage: Some(u),
+                            ..
                         },
                     ..
                 },
@@ -481,7 +509,12 @@ impl RunAccumulator {
                     cache_read: *cache_read_tokens,
                     cache_write: *cache_write_tokens,
                 };
-                match cost_usd(&self.pricing, &self.model, crab_core::util::now_ms() as i64, &event_usage) {
+                match cost_usd(
+                    &self.pricing,
+                    &self.model,
+                    crab_core::util::now_ms() as i64,
+                    &event_usage,
+                ) {
                     Some(c) => self.cost = self.cost.map(|sum| sum + c),
                     None => self.cost = None, // sticky: a turn is priced in full or not at all
                 }
@@ -499,7 +532,11 @@ impl RunAccumulator {
                 self.interrupted = matches!(reason, crab_core::types::StopReason::Aborted);
                 // No usage frames at all -> the provider told us nothing; cost
                 // is unknown rather than zero.
-                let cost = if self.usage_events == 0 { None } else { self.cost };
+                let cost = if self.usage_events == 0 {
+                    None
+                } else {
+                    self.cost
+                };
                 Some(TurnRow {
                     session_id: String::new(), // filled by the sink
                     run_id: 0,                 // filled by the sink
@@ -585,7 +622,9 @@ impl MetricsDb {
         let mut stmt = self
             .conn
             .prepare("SELECT ts/86400000, duration_ms FROM turns WHERE ts >= ?1")?;
-        let rows = stmt.query_map([since_ms], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map([since_ms], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -777,9 +816,14 @@ pub fn render_report(daily: &[DailyRow], models: &[ModelRow], days: u32) -> Stri
 
 /// `crab metrics [days] [--json]`.
 pub fn report(days: u32, json: bool) -> anyhow::Result<()> {
-    let db_path = std::env::current_dir()?.join(".crab").join("metrics.sqlite");
+    let db_path = std::env::current_dir()?
+        .join(".crab")
+        .join("metrics.sqlite");
     if !db_path.exists() {
-        anyhow::bail!("no metrics database at {} — run a conversation first", db_path.display());
+        anyhow::bail!(
+            "no metrics database at {} — run a conversation first",
+            db_path.display()
+        );
     }
     let db = MetricsDb::open(&db_path)?;
     let daily = db.daily_report(days)?;
@@ -791,7 +835,14 @@ pub fn report(days: u32, json: bool) -> anyhow::Result<()> {
             daily: &'a [DailyRow],
             models: &'a [ModelRow],
         }
-        println!("{}", serde_json::to_string_pretty(&Report { days, daily: &daily, models: &models })?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Report {
+                days,
+                daily: &daily,
+                models: &models
+            })?
+        );
     } else {
         print!("{}", render_report(&daily, &models, days));
     }
@@ -835,13 +886,20 @@ cache_write = 0.07
         let p = embedded_pricing();
         let flash = &p.models["deepseek-flash"];
         assert_eq!(flash.len(), 1);
-        assert_eq!(flash[0].windows.len(), 2, "two peak windows (01-04, 06-10 UTC)");
+        assert_eq!(
+            flash[0].windows.len(),
+            2,
+            "two peak windows (01-04, 06-10 UTC)"
+        );
         let k3 = &p.models["kimi-k3"];
         assert!(k3[0].base.output > 0.0);
         // resolution smoke: Tuesday 02:30 UTC is peak for flash; Saturday is not.
         let tue_peak = parse_rfc3339("2026-10-20T02:30:00Z").unwrap();
         let sat = parse_rfc3339("2026-10-24T02:30:00Z").unwrap();
-        let u = LlmUsage { prompt: 1_000_000, ..Default::default() };
+        let u = LlmUsage {
+            prompt: 1_000_000,
+            ..Default::default()
+        };
         assert!((cost_usd(&p, "deepseek-flash", tue_peak, &u).unwrap() - 0.30).abs() < 1e-9);
         assert!((cost_usd(&p, "deepseek-flash", sat, &u).unwrap() - 0.15).abs() < 1e-9);
     }
@@ -849,7 +907,10 @@ cache_write = 0.07
     #[test]
     fn rfc3339_parses_known_values() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_rfc3339("2024-01-01T00:00:00Z"), Some(19_723 * 86_400_000));
+        assert_eq!(
+            parse_rfc3339("2024-01-01T00:00:00Z"),
+            Some(19_723 * 86_400_000)
+        );
         assert_eq!(
             parse_rfc3339("2024-01-01T00:00:00+08:00"),
             Some(19_723 * 86_400_000 - 8 * 3_600_000)
@@ -911,7 +972,10 @@ cache_write = 0.07
             start_min: 60,
             end_min: 180,
             tz_min: 0,
-            rates: Rates { input: 9.0, ..Default::default() },
+            rates: Rates {
+                input: 9.0,
+                ..Default::default()
+            },
             weekdays: vec![1, 2, 3, 4, 5],
         };
         assert!(w.matches(tue));
@@ -923,11 +987,19 @@ cache_write = 0.07
         let p = parse_pricing("[models.x]\ninput = 1.0\ncache_read = 0.1\n");
         let ts = parse_rfc3339("2026-10-20T00:00:00Z").unwrap();
         // prompt 100 INCLUSIVE of 40 cache hits: uncached 60 @ 1.0 + hits 40 @ 0.1
-        let u = LlmUsage { prompt: 100, completion: 0, cache_read: 40, cache_write: 0 };
+        let u = LlmUsage {
+            prompt: 100,
+            completion: 0,
+            cache_read: 40,
+            cache_write: 0,
+        };
         let cost = cost_usd(&p, "x", ts, &u).unwrap();
         assert!((cost - (60.0 + 4.0) / 1_000_000.0).abs() < 1e-12, "{cost}");
         // no cache fields -> plain prompt * input
-        let plain = LlmUsage { prompt: 100, ..Default::default() };
+        let plain = LlmUsage {
+            prompt: 100,
+            ..Default::default()
+        };
         let cost2 = cost_usd(&p, "x", ts, &plain).unwrap();
         assert!((cost2 - 100.0 / 1_000_000.0).abs() < 1e-12, "{cost2}");
     }
@@ -935,7 +1007,10 @@ cache_write = 0.07
     #[test]
     fn cost_resolves_by_timestamp_and_peak_valley() {
         let p = pricing_fixture();
-        let u = LlmUsage { prompt: 1_000_000, ..Default::default() };
+        let u = LlmUsage {
+            prompt: 1_000_000,
+            ..Default::default()
+        };
         let t_old = parse_rfc3339("2025-01-01T12:00:00+08:00").unwrap();
         let t_peak = parse_rfc3339("2025-10-01T12:00:00+08:00").unwrap();
         let t_valley = parse_rfc3339("2025-10-01T04:00:00+08:00").unwrap();
@@ -949,38 +1024,40 @@ cache_write = 0.07
 
     #[test]
     fn accumulator_counts_usage_tools_and_finish() {
-        let mut acc = RunAccumulator::new(
-            pricing_fixture(),
-            "deepseek".into(),
-            "deepseek-chat".into(),
-        );
+        let mut acc =
+            RunAccumulator::new(pricing_fixture(), "deepseek".into(), "deepseek-chat".into());
         assert!(acc.on_event(&AgentEvent::TurnStarted { turn: 0 }).is_none());
         for _ in 0..2 {
-            assert!(acc
-                .on_event(&AgentEvent::Usage {
+            assert!(
+                acc.on_event(&AgentEvent::Usage {
                     prompt_tokens: 100,
                     completion_tokens: 10,
                     cache_read_tokens: 5,
                     cache_write_tokens: 1,
                 })
-                .is_none());
+                .is_none()
+            );
         }
-        assert!(acc
-            .on_event(&AgentEvent::ToolCallFinished {
+        assert!(
+            acc.on_event(&AgentEvent::ToolCallFinished {
                 id: "t".into(),
                 result: "ok".into(),
                 is_error: false,
             })
-            .is_none());
-        assert!(acc
-            .on_event(&AgentEvent::ToolCallFinished {
+            .is_none()
+        );
+        assert!(
+            acc.on_event(&AgentEvent::ToolCallFinished {
                 id: "t2".into(),
                 result: "nope".into(),
                 is_error: true,
             })
-            .is_none());
+            .is_none()
+        );
         let row = acc
-            .on_event(&AgentEvent::Finished { reason: StopReason::EndTurn })
+            .on_event(&AgentEvent::Finished {
+                reason: StopReason::EndTurn,
+            })
             .expect("Finished produces the row");
         assert_eq!(row.llm_calls, 2);
         assert_eq!(row.tool_calls, 2);
@@ -1090,7 +1167,10 @@ output = 0.2
         // A user version with the same `since` merges into the embedded one:
         // user's non-zero field wins, embedded fields survive.
         let since = parse_rfc3339("2025-02-09T00:00:00+08:00").unwrap();
-        let v0 = p.models["deepseek-chat"].iter().find(|v| v.since == since).unwrap();
+        let v0 = p.models["deepseek-chat"]
+            .iter()
+            .find(|v| v.since == since)
+            .unwrap();
         assert_eq!(v0.base.input, 0.99);
         assert_eq!(v0.base.output, 1.10);
         assert_eq!(v0.base.cache_read, 0.07);
@@ -1117,8 +1197,15 @@ output = 4.00
         .unwrap();
         let p = load_pricing_from(Some(&user));
         let chain = &p.models["deepseek-chat"];
-        assert_eq!(chain.len(), 3, "two embedded historical versions + user future version");
-        assert!(chain.windows(2).all(|w| w[0].since < w[1].since), "chain stays ascending");
+        assert_eq!(
+            chain.len(),
+            3,
+            "two embedded historical versions + user future version"
+        );
+        assert!(
+            chain.windows(2).all(|w| w[0].since < w[1].since),
+            "chain stays ascending"
+        );
         assert_eq!(chain[2].base.input, 1.50);
     }
 
@@ -1154,16 +1241,18 @@ output = 4.00
 
     #[test]
     fn turn_without_usage_events_has_unknown_cost() {
-        let mut acc = RunAccumulator::new(
-            pricing_fixture(),
-            "deepseek".into(),
-            "deepseek-chat".into(),
-        );
+        let mut acc =
+            RunAccumulator::new(pricing_fixture(), "deepseek".into(), "deepseek-chat".into());
         acc.on_event(&AgentEvent::TurnStarted { turn: 0 });
         let row = acc
-            .on_event(&AgentEvent::Finished { reason: StopReason::EndTurn })
+            .on_event(&AgentEvent::Finished {
+                reason: StopReason::EndTurn,
+            })
             .unwrap();
-        assert!(row.cost_usd.is_none(), "no usage frames -> unknown, not zero");
+        assert!(
+            row.cost_usd.is_none(),
+            "no usage frames -> unknown, not zero"
+        );
     }
 
     #[test]

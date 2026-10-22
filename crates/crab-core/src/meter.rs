@@ -21,9 +21,7 @@ pub fn context_used(entries: &[SessionEntry]) -> Option<u64> {
         SessionEntry::Obs {
             event:
                 crate::obs::ObsEvent {
-                    body: ObsBody::LlmCall {
-                        usage: Some(u), ..
-                    },
+                    body: ObsBody::LlmCall { usage: Some(u), .. },
                     ..
                 },
             ..
@@ -42,9 +40,7 @@ pub fn prompt_sizes(entries: &[SessionEntry]) -> Vec<u64> {
             SessionEntry::Obs {
                 event:
                     crate::obs::ObsEvent {
-                        body: ObsBody::LlmCall {
-                            usage: Some(u), ..
-                        },
+                        body: ObsBody::LlmCall { usage: Some(u), .. },
                         ..
                     },
                 ..
@@ -64,9 +60,7 @@ pub fn usage_totals(entries: &[SessionEntry]) -> crate::obs::LlmUsage {
             SessionEntry::Obs {
                 event:
                     crate::obs::ObsEvent {
-                        body: ObsBody::LlmCall {
-                            usage: Some(u), ..
-                        },
+                        body: ObsBody::LlmCall { usage: Some(u), .. },
                         ..
                     },
                 ..
@@ -215,10 +209,7 @@ mod tests {
     fn message_rows_after_last_call_do_not_move_the_fold() {
         // Tool results / assistant text appended after the final call are not
         // in any prompt yet — the last provider-reported number stands.
-        let entries = vec![
-            llm_call(Some(usage(7_000))),
-            msg(Role::Assistant, "done"),
-        ];
+        let entries = vec![llm_call(Some(usage(7_000))), msg(Role::Assistant, "done")];
         assert_eq!(context_used(&entries), Some(7_000));
     }
 

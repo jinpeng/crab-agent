@@ -236,11 +236,7 @@ pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
         return None;
     }
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 #[cfg(test)]
@@ -299,7 +295,11 @@ mod tests {
         assert_eq!(s.tokens_out, 60);
         assert_eq!(s.cache_read, 100);
         assert_eq!(s.cache_write, 10);
-        assert_eq!(s.context_used, Some(300), "context tracks the latest prompt size");
+        assert_eq!(
+            s.context_used,
+            Some(300),
+            "context tracks the latest prompt size"
+        );
     }
 
     #[test]
@@ -315,7 +315,10 @@ mod tests {
         assert_eq!(s.tokens_out, 5_000);
         assert_eq!(s.cache_read, 40_000);
         assert_eq!(s.cache_write, 100);
-        assert_eq!(s.context_used, None, "a seed must not fake the latest prompt");
+        assert_eq!(
+            s.context_used, None,
+            "a seed must not fake the latest prompt"
+        );
         // 后续 add_usage 照常刷新 context。
         s.add_usage(crab_core::obs::LlmUsage {
             prompt: 100,
@@ -348,7 +351,10 @@ mod tests {
         // context: one-decimal percent + window (pi's 20.5%/1.0M)
         assert!(row.contains("6.6%/128.0k"), "got {row:?}"); // 8500/128000
         assert!(row.contains("streaming"), "got {row:?}");
-        assert!(row.trim_end().ends_with("deepseek/deepseek-chat"), "got {row:?}");
+        assert!(
+            row.trim_end().ends_with("deepseek/deepseek-chat"),
+            "got {row:?}"
+        );
     }
 
     #[test]
@@ -358,7 +364,10 @@ mod tests {
         // CH=缓存命中率（910/45600 ≈ 2.0%，一位小数）。
         assert!(row.contains("↑45.6k ↓12.3k"), "got {row:?}");
         assert!(row.contains("R910"), "got {row:?}");
-        assert!(!row.contains('W'), "cache_write is 0 in the fixture: {row:?}");
+        assert!(
+            !row.contains('W'),
+            "cache_write is 0 in the fixture: {row:?}"
+        );
         assert!(row.contains("CH2.0%"), "got {row:?}");
     }
 
@@ -383,10 +392,16 @@ mod tests {
         );
         let mut free = full();
         free.set_cost(None);
-        assert!(!free.format_status_row(80).contains('$'), "unpriced shows no cost");
+        assert!(
+            !free.format_status_row(80).contains('$'),
+            "unpriced shows no cost"
+        );
         let mut zero = full();
         zero.set_cost(Some(0.0));
-        assert!(!zero.format_status_row(80).contains('$'), "zero cost shows no segment");
+        assert!(
+            !zero.format_status_row(80).contains('$'),
+            "zero cost shows no segment"
+        );
     }
 
     #[test]
@@ -402,7 +417,10 @@ mod tests {
         let mut s = full();
         s.context_window = None;
         let row = s.format_status_row(80);
-        assert!(!row.contains("%/"), "no context segment without a window: {row:?}");
+        assert!(
+            !row.contains("%/"),
+            "no context segment without a window: {row:?}"
+        );
     }
 
     #[test]
