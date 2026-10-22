@@ -32,8 +32,44 @@ pub fn context_used(entries: &[SessionEntry]) -> Option<u64> {
     })
 }
 
+/// Prompt-token count of every LlmCall that carried usage, in log order.
+/// `compact::plan` derives per-pair sizes from consecutive differences of
+/// this sequence (spec §3 fold→尺寸映射).
+pub fn prompt_sizes(entries: &[SessionEntry]) -> Vec<u64> {
+    entries
+        .iter()
+        .filter_map(|e| match e {
+            SessionEntry::Obs {
+                event:
+                    crate::obs::ObsEvent {
+                        body: ObsBody::LlmCall {
+                            usage: Some(u), ..
+                        },
+                        ..
+                    },
+                ..
+            } => Some(u.prompt as u64),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prompt_sizes_collects_usage_carrying_calls_in_order() {
+        let entries = vec![
+            llm_call(Some(usage(10_000))),
+            llm_call(None),
+            llm_call(Some(usage(14_500))),
+        ];
+        assert_eq!(prompt_sizes(&entries), vec![10_000, 14_500]);
+    }
+
+    #[test]
+    fn prompt_sizes_empty_when_no_usage() {
+        assert!(prompt_sizes(&[msg(Role::User, "hi")]).is_empty());
+    }
     use super::*;
     use crate::obs::{ObsEvent, ObsOutcome};
     use crate::session::{Session, SessionEntry};
