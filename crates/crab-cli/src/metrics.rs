@@ -326,6 +326,69 @@ pub fn cost_usd(p: &Pricing, model: &str, ts_ms: i64, u: &LlmUsage) -> Option<f6
     )
 }
 
+/// Cumulative session cost for live display (the status line's `$` segment).
+/// Same pricing as the metrics sink, folded independently — 观测不改变系统.
+/// `total` stays None until a priced usage arrives (unpriced models show no
+/// cost segment, like pi).
+#[derive(Debug)]
+pub struct Pricer {
+    pricing: Pricing,
+    model: String,
+    total: Option<f64>,
+}
+
+impl Pricer {
+    pub fn new(model: &str) -> Self {
+        Self {
+            pricing: load_pricing(),
+            model: model.to_string(),
+            total: None,
+        }
+    }
+
+    /// Resume baseline: the replayed session's cost (--continue), so the
+    /// display continues from where the log left off.
+    pub fn seed(&mut self, baseline: f64) {
+        self.total = Some(baseline);
+    }
+
+    pub fn on_usage(&mut self, ts_ms: i64, u: &LlmUsage) {
+        if let Some(c) = cost_usd(&self.pricing, &self.model, ts_ms, u) {
+            *self.total.get_or_insert(0.0) += c;
+        }
+    }
+
+    pub fn total(&self) -> Option<f64> {
+        self.total
+    }
+}
+
+/// Cumulative cost of a session log: each LlmCall priced at its own
+/// timestamp and model. None when nothing was priced (resume seed).
+pub fn session_cost(entries: &[crab_core::session::SessionEntry]) -> Option<f64> {
+    let pricing = load_pricing();
+    let mut total = None;
+    for e in entries {
+        if let crab_core::session::SessionEntry::Obs {
+            event:
+                crab_core::obs::ObsEvent {
+                    ts,
+                    body:
+                        crab_core::obs::ObsBody::LlmCall {
+                            model, usage: Some(u), ..
+                        },
+                    ..
+                },
+            ..
+        } = e
+            && let Some(c) = cost_usd(&pricing, model, *ts as i64, u)
+        {
+            *total.get_or_insert(0.0) += c;
+        }
+    }
+    total
+}
+
 /// One finished turn = one row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnRow {
@@ -925,6 +988,84 @@ cache_write = 0.07
         assert_eq!(row.prompt_tokens, 200);
         assert!(row.cost_usd.unwrap() > 0.0);
         assert!(!row.interrupted);
+    }
+
+    #[test]
+    fn pricer_accumulates_priced_usage_and_seeds() {
+        let mut p = Pricer::new("deepseek-chat");
+        assert_eq!(p.total(), None, "nothing priced yet");
+        let ts = 1_735_689_600_000i64; // 2025-01-01, inside the priced era
+        p.on_usage(
+            ts,
+            &LlmUsage {
+                prompt: 1_000_000,
+                completion: 100_000,
+                cache_read: 0,
+                cache_write: 0,
+            },
+        );
+        let t1 = p.total().unwrap();
+        assert!(t1 > 0.0, "{t1}");
+        // 未定价模型：total 保持 None。
+        let mut free = Pricer::new("no-such-model");
+        free.on_usage(ts, &LlmUsage::default());
+        assert_eq!(free.total(), None);
+        // seed = --continue 的日志成本基线，之后在其上累加。
+        let mut resumed = Pricer::new("deepseek-chat");
+        resumed.seed(0.5);
+        resumed.on_usage(
+            ts,
+            &LlmUsage {
+                prompt: 1_000_000,
+                ..Default::default()
+            },
+        );
+        assert!(resumed.total().unwrap() > 0.5);
+    }
+
+    #[test]
+    fn session_cost_sums_llm_calls_at_their_own_timestamps() {
+        use crab_core::obs::{ObsBody, ObsEvent, ObsOutcome};
+        use crab_core::session::SessionEntry;
+        let ts = 1_735_689_600_000u64; // 2025-01-01
+        let call = |prompt: u32| SessionEntry::Obs {
+            id: 1,
+            event: ObsEvent {
+                run_id: 0,
+                ts,
+                body: ObsBody::LlmCall {
+                    provider: "x".into(),
+                    model: "deepseek-chat".into(),
+                    duration_ms: 1,
+                    usage: Some(LlmUsage {
+                        prompt,
+                        ..Default::default()
+                    }),
+                    outcome: ObsOutcome::Ok,
+                },
+            },
+        };
+        let priced = session_cost(&[call(1_000_000)]).unwrap();
+        assert!(priced > 0.0, "{priced}");
+        // 两次调用 = 两倍；无 usage 的调用被跳过。
+        let skip = SessionEntry::Obs {
+            id: 2,
+            event: ObsEvent {
+                run_id: 0,
+                ts,
+                body: ObsBody::LlmCall {
+                    provider: "x".into(),
+                    model: "deepseek-chat".into(),
+                    duration_ms: 1,
+                    usage: None,
+                    outcome: ObsOutcome::Ok,
+                },
+            },
+        };
+        let double = session_cost(&[call(1_000_000), call(1_000_000), skip]).unwrap();
+        assert!((double - priced * 2.0).abs() < 1e-9, "{double} vs {priced}");
+        // 无可定价调用 → None。
+        assert_eq!(session_cost(&[]), None);
     }
 
     #[test]

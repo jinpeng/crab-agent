@@ -465,13 +465,13 @@ mod tests {
             completion: 100,
             cache_read: 0,
             cache_write: 0,
-        }); // makes the CH segment appear
+        }); // makes the context segment appear
         let rows = render_frame(&mut s, 80, 12);
         let cwd_row = &rows[rows.len() - 2];
         let status_row = &rows[rows.len() - 1];
         assert!(cwd_row.contains("/x"), "{rows:?}");
         assert!(status_row.contains('↑'), "{rows:?}");
-        assert!(status_row.contains("CH"), "{rows:?}");
+        assert!(status_row.contains("6.6%/128.0k"), "{rows:?}");
         assert!(
             status_row.trim_end().ends_with("deepseek/deepseek-chat"),
             "{status_row:?}"
@@ -492,7 +492,7 @@ mod tests {
         );
         let rows = render_frame(&mut s, 80, 12);
         let status_row = &rows[rows.len() - 1];
-        assert!(status_row.contains("CH66% 85.0k/128.0k"), "{status_row:?}");
+        assert!(status_row.contains("66.4%/128.0k"), "{status_row:?}");
     }
 
     /// `--continue` also seeds the cumulative counters: the first frame shows

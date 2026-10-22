@@ -60,6 +60,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
         context_used,
         replay,
         usage_totals,
+        cost,
     } = startup;
     // Best-effort metrics sink (independent broadcast receiver).
     crate::spawn_metrics_sink(&mut agent, &provider);
@@ -113,6 +114,14 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     // Seed the token counters from the log too — the status line resumes
     // where the session left off (↑↓R/W), rather than restarting at zero.
     state.status.seed_usage(usage_totals);
+    // Same for the cost segment: replayed from the log, then folded live by
+    // the pricer (same pricing as `crab metrics`).
+    let mut pricer = crate::metrics::Pricer::new(&provider.model);
+    if let Some(c0) = cost {
+        pricer.seed(c0);
+        state.status.set_cost(pricer.total());
+    }
+    state.pricer = Some(pricer);
     state.yolo = gate.is_permissive();
 
     // Errors from agent runs go through the UI channel: printing to stderr

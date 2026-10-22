@@ -42,6 +42,8 @@ pub struct StatusLine {
     tokens_out: u64,
     cache_read: u64,
     cache_write: u64,
+    /// Cumulative session cost (USD) for the `$` segment; None = unpriced.
+    cost: Option<f64>,
     context_used: Option<u64>,
     context_window: Option<u64>,
     cwd: PathBuf,
@@ -61,6 +63,7 @@ impl StatusLine {
             tokens_out: 0,
             cache_read: 0,
             cache_write: 0,
+            cost: None,
             context_used: None,
             context_window: None,
             cwd,
@@ -100,6 +103,12 @@ impl StatusLine {
         self.cache_write += u.cache_write as u64;
     }
 
+    /// Replace the cumulative cost (`--continue` seed or a live pricer fold).
+    /// None hides the segment entirely (pi shows cost only when non-zero).
+    pub fn set_cost(&mut self, cost: Option<f64>) {
+        self.cost = cost;
+    }
+
     /// Replace the cached git branch (refreshed by the TUI's async task).
     pub fn set_branch(&mut self, branch: Option<String>) {
         self.branch = branch;
@@ -121,10 +130,12 @@ impl StatusLine {
         truncate_to_width(&format!(" {label} "), width)
     }
 
-    /// Row 2: left `↑in ↓out [R<cacheRead> [W<cacheWrite>]] CH<pct>% <state>`
-    /// (pi's arrow convention: ↑ = input, ↓ = output; R/W only when non-zero)
-    /// and right `(provider) model`, right-aligned to `width`. When too narrow
-    /// the model label is dropped and only the left part is kept (clipped).
+    /// Row 2: left `↑in ↓out [R<cacheRead> [W<cacheWrite>]] [CH<hit%>] [$cost]
+    /// <ctx%>/<window> <state>` (pi's footer: ↑=input ↓=output, R/W cumulative
+    /// cache tokens, CH = cache HIT RATE one decimal, $ = cumulative cost,
+    /// context as one-decimal percent of the window) and right
+    /// `(provider) model`, right-aligned to `width`. When too narrow the model
+    /// label is dropped and only the left part is kept (clipped).
     pub fn format_status_row(&self, width: usize) -> String {
         let mut left = format!("↑{} ↓{}", kfmt(self.tokens_in), kfmt(self.tokens_out));
         if self.cache_read > 0 {
@@ -133,9 +144,16 @@ impl StatusLine {
         if self.cache_write > 0 {
             left.push_str(&format!(" W{}", kfmt(self.cache_write)));
         }
-        if let Some(ch) = self.ch_segment() {
+        if let Some(ch) = self.cache_hit_segment() {
             left.push(' ');
             left.push_str(&ch);
+        }
+        if let Some(cost) = self.cost.filter(|c| *c > 0.0) {
+            left.push_str(&format!(" ${cost:.3}"));
+        }
+        if let Some(ctx) = self.context_segment() {
+            left.push(' ');
+            left.push_str(&ctx);
         }
         left.push(' ');
         left.push_str(self.state.word());
@@ -150,13 +168,24 @@ impl StatusLine {
         truncate_to_width(&format!(" {left} "), width)
     }
 
-    /// `CH<pct>% <used>/<window>` (e.g. `CH12% 15.4k/128.0k`), or None when
+    /// `CH<pct>%` — the cache HIT RATE (pi's CH), cumulative:
+    /// cache_read / prompt (prompt includes cache hits per the DeepSeek
+    /// convention). Shown only when cache activity exists; one decimal.
+    fn cache_hit_segment(&self) -> Option<String> {
+        if self.cache_read == 0 && self.cache_write == 0 {
+            return None;
+        }
+        let pct = 100.0 * self.cache_read as f64 / self.tokens_in.max(1) as f64;
+        Some(format!("CH{pct:.1}%"))
+    }
+
+    /// `<pct>%/<window>` with one decimal (pi's `20.5%/1.0M`), or None when
     /// usage or the window is unknown.
-    fn ch_segment(&self) -> Option<String> {
+    fn context_segment(&self) -> Option<String> {
         let used = self.context_used?;
         let window = self.context_window.filter(|w| *w > 0)?;
-        let pct = (used.saturating_mul(100) + window / 2) / window;
-        Some(format!("CH{pct}% {}/{}", kfmt(used), kfmt(window)))
+        let pct = used as f64 * 100.0 / window as f64;
+        Some(format!("{pct:.1}%/{}", kfmt(window)))
     }
 
     /// The working directory, with a leading `$HOME` shortened to `~`.
@@ -233,6 +262,7 @@ mod tests {
             tokens_out: 12_300,
             cache_read: 910,
             cache_write: 0,
+            cost: None,
             context_used: Some(8500),
             context_window: Some(128_000),
             cwd: home().join("projects/crab"),
@@ -315,7 +345,8 @@ mod tests {
         let row = full().format_status_row(80);
         assert_eq!(visible_width(&row), 80, "got {row:?}");
         assert!(row.contains("↑45.6k ↓12.3k"), "got {row:?}");
-        assert!(row.contains("CH7% 8.5k/128.0k"), "got {row:?}"); // 8500/128000 ~ 6.6% -> 7%
+        // context: one-decimal percent + window (pi's 20.5%/1.0M)
+        assert!(row.contains("6.6%/128.0k"), "got {row:?}"); // 8500/128000
         assert!(row.contains("streaming"), "got {row:?}");
         assert!(row.trim_end().ends_with("deepseek/deepseek-chat"), "got {row:?}");
     }
@@ -323,11 +354,12 @@ mod tests {
     #[test]
     fn status_row_uses_pi_arrow_convention_with_cache_segments() {
         let row = full().format_status_row(80);
-        // pi: ↑=input ↓=output；R=cache-read，W 只在非零时出现。
+        // pi: ↑=input ↓=output；R/W=累计缓存 tokens（非零才显示）；
+        // CH=缓存命中率（910/45600 ≈ 2.0%，一位小数）。
         assert!(row.contains("↑45.6k ↓12.3k"), "got {row:?}");
         assert!(row.contains("R910"), "got {row:?}");
         assert!(!row.contains('W'), "cache_write is 0 in the fixture: {row:?}");
-        assert!(row.contains("CH7% 8.5k/128.0k"), "got {row:?}");
+        assert!(row.contains("CH2.0%"), "got {row:?}");
     }
 
     #[test]
@@ -339,6 +371,25 @@ mod tests {
     }
 
     #[test]
+    fn status_row_shows_cost_when_priced() {
+        let mut s = full();
+        s.set_cost(Some(0.042_169));
+        let row = s.format_status_row(80);
+        assert!(row.contains("$0.042"), "got {row:?}");
+        // 成本段在 context 段之前（pi 顺序）。
+        assert!(
+            row.find("$0.042").unwrap() < row.find("6.6%").unwrap(),
+            "cost before context: {row:?}"
+        );
+        let mut free = full();
+        free.set_cost(None);
+        assert!(!free.format_status_row(80).contains('$'), "unpriced shows no cost");
+        let mut zero = full();
+        zero.set_cost(Some(0.0));
+        assert!(!zero.format_status_row(80).contains('$'), "zero cost shows no segment");
+    }
+
+    #[test]
     fn status_row_drops_model_when_narrow() {
         let row = full().format_status_row(24);
         assert!(visible_width(&row) <= 24);
@@ -347,11 +398,11 @@ mod tests {
     }
 
     #[test]
-    fn status_row_omits_ch_without_window() {
+    fn status_row_omits_context_without_window() {
         let mut s = full();
         s.context_window = None;
         let row = s.format_status_row(80);
-        assert!(!row.contains("CH"), "got {row:?}");
+        assert!(!row.contains("%/"), "no context segment without a window: {row:?}");
     }
 
     #[test]

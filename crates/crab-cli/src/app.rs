@@ -51,6 +51,9 @@ pub struct Startup {
     /// Cumulative token counters replayed from the log — seeds the status
     /// line on `--continue` so ↑↓R/W don't restart at zero.
     pub usage_totals: crab_core::obs::LlmUsage,
+    /// Cumulative session cost replayed from the log (per-call timestamps and
+    /// models) — seeds the status line's `$` segment on `--continue`.
+    pub cost: Option<f64>,
 }
 
 impl From<&crate::Cli> for AppConfig {
@@ -216,6 +219,11 @@ pub async fn build_agent(
         context_used,
         replay,
         usage_totals: crab_core::meter::usage_totals(&session_entries_snapshot),
+        cost: if continue_ {
+            crate::metrics::session_cost(&session_entries_snapshot)
+        } else {
+            None
+        },
     })
 }
 

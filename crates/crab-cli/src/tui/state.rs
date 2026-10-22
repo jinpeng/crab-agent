@@ -343,6 +343,9 @@ pub struct TuiState {
     /// What the last draw rendered: selectable rows + screen geometry.
     /// Refreshed every frame; mouse hit-testing runs against it.
     pub select_grid: Option<super::select::SelectGrid>,
+    /// Live cost fold for the status line's `$` segment (pi parity). None in
+    /// contexts without pricing (created by the TUI after construction).
+    pub pricer: Option<crate::metrics::Pricer>,
 }
 
 impl TuiState {
@@ -372,6 +375,7 @@ impl TuiState {
             tool_args_cache: HashMap::new(),
             selection: None,
             select_grid: None,
+            pricer: None,
         }
     }
 
@@ -579,12 +583,18 @@ impl TuiState {
                 cache_read_tokens,
                 cache_write_tokens,
             } => {
-                self.status.add_usage(crab_core::obs::LlmUsage {
+                let u = crab_core::obs::LlmUsage {
                     prompt: prompt_tokens,
                     completion: completion_tokens,
                     cache_read: cache_read_tokens,
                     cache_write: cache_write_tokens,
-                });
+                };
+                self.status.add_usage(u);
+                // Same pricing fold as the metrics sink, for the `$` segment.
+                if let Some(p) = &mut self.pricer {
+                    p.on_usage(crab_core::util::now_ms() as i64, &u);
+                    self.status.set_cost(p.total());
+                }
             }
             Compacted {
                 strategy,
