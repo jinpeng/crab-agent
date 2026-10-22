@@ -288,13 +288,47 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
     },
 ];
 
-/// Live slash-command hint: which filter produced it + the selection.
+/// Live slash-command hint: what filter produced it + the selection.
 /// Synced from the input at draw/key time; the selection survives only
 /// while the filter text is unchanged.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SlashHint {
-    pub filter: String,
+    pub kind: HintKind,
     pub selected: usize,
+}
+
+/// What the hint is completing: a command name, or the argument of
+/// `/model <name>` / `/skill:<name>` (listed once the separator is typed).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum HintKind {
+    Command(String),
+    ModelArg(String),
+    SkillArg(String),
+}
+
+impl HintKind {
+    /// Identity for reset-on-change: kind tag + filter text.
+    fn key(&self) -> (u8, &str) {
+        match self {
+            HintKind::Command(f) => (0, f),
+            HintKind::ModelArg(f) => (1, f),
+            HintKind::SkillArg(f) => (2, f),
+        }
+    }
+}
+
+/// Classify the input for hint purposes: once the argument separator is
+/// typed, the hint switches to completing that argument.
+fn hint_kind(input: &str) -> HintKind {
+    for prefix in ["/model ", "/m "] {
+        if let Some(rest) = input.strip_prefix(prefix) {
+            return HintKind::ModelArg(rest.to_string());
+        }
+    }
+    if let Some(rest) = input.strip_prefix("/skill:") {
+        return HintKind::SkillArg(rest.to_string());
+    }
+    HintKind::Command(input.trim_start_matches('/').to_string())
 }
 
 /// Parse a slash command line (leading `/` already stripped of surrounding space).
@@ -406,6 +440,13 @@ pub struct TuiState {
     pub pricer: Option<crate::metrics::Pricer>,
     /// Slash-command hint (pi-style autocomplete), synced from the input.
     pub slash_hint: Option<SlashHint>,
+    /// Input text whose hint the user dismissed with Esc; the hint stays
+    /// hidden while the input is unchanged and returns when it changes.
+    pub slash_dismissed: Option<String>,
+    /// Provider profile names for `/model ` argument completion.
+    pub model_names: Vec<String>,
+    /// Discovered skills for `/skill:` argument completion.
+    pub skills: Vec<crab_core::skills::Skill>,
 }
 
 impl TuiState {
@@ -437,6 +478,9 @@ impl TuiState {
             select_grid: None,
             pricer: None,
             slash_hint: None,
+            slash_dismissed: None,
+            model_names: Vec::new(),
+            skills: Vec::new(),
         }
     }
 
@@ -613,8 +657,18 @@ impl TuiState {
 
     // ---- slash-command hint (pi-style autocomplete) ----
 
+    /// Commands matching a command-name filter (text after `/`).
+    pub fn slash_matches_for(rest: &str) -> Vec<&'static SlashCmd> {
+        SLASH_COMMANDS
+            .iter()
+            .filter(|c| c.names.iter().any(|n| n.starts_with(rest)))
+            .collect()
+    }
+
     /// Commands matching the input's command token (`/` + prefix, no args
     /// yet). Empty for non-slash input or once arguments are being typed.
+    /// (Test-facing convenience over `slash_matches_for`.)
+    #[cfg(test)]
     pub fn slash_matches(input: &str) -> Vec<&'static SlashCmd> {
         let Some(rest) = input.strip_prefix('/') else {
             return Vec::new();
@@ -622,65 +676,112 @@ impl TuiState {
         if rest.contains(char::is_whitespace) || rest.contains(':') {
             return Vec::new();
         }
-        SLASH_COMMANDS
-            .iter()
-            .filter(|c| c.names.iter().any(|n| n.starts_with(rest)))
-            .collect()
+        Self::slash_matches_for(rest)
+    }
+
+    /// Completions for a hint kind: what Enter would fill the input with.
+    fn hint_completions(&self, kind: &HintKind) -> Vec<String> {
+        match kind {
+            HintKind::Command(_) => Self::slash_matches_for(kind.key().1)
+                .iter()
+                .map(|c| c.completion.to_string())
+                .collect(),
+            HintKind::ModelArg(prefix) => self
+                .model_names
+                .iter()
+                .filter(|n| n.starts_with(prefix.as_str()))
+                .map(|n| format!("/model {n}"))
+                .collect(),
+            HintKind::SkillArg(prefix) => self
+                .skills
+                .iter()
+                .filter(|s| s.name.starts_with(prefix.as_str()))
+                .map(|s| format!("/skill:{} ", s.name))
+                .collect(),
+        }
     }
 
     /// Refresh the hint from the current input. Keeps the selection while the
     /// filter is unchanged, resets it when the text changes, hides the hint
-    /// when nothing matches or the input is already a complete no-arg command.
+    /// when nothing matches, when a no-arg command is fully spelled, or when
+    /// the user dismissed this exact input with Esc.
     pub fn sync_slash_hint(&mut self) {
         let input = self.input.text().to_string();
-        let matches = Self::slash_matches(&input);
-        let done_no_arg = matches.len() == 1 && {
-            // 完整输入了规范形且无参：隐藏提示，Enter 直接执行。
-            // （别名如 /q 保留提示，便于补全为规范形 /quit。）
-            let rest = input.trim_start_matches('/');
-            !matches[0].completion.ends_with(' ')
-                && !matches[0].completion.ends_with(':')
-                && matches[0].names.first() == Some(&rest)
-        };
-        if !input.starts_with('/') || matches.is_empty() || done_no_arg {
+        if self.slash_dismissed.as_deref() == Some(input.as_str()) {
             self.slash_hint = None;
             return;
         }
-        let filter = input[1..].to_string();
+        self.slash_dismissed = None;
+        if !input.starts_with('/') {
+            self.slash_hint = None;
+            return;
+        }
+        let kind = hint_kind(&input);
+        let matches = self.hint_completions(&kind);
+        let done_no_arg = matches!(kind, HintKind::Command(_))
+            && matches.len() == 1
+            && {
+                // 完整输入了规范形且无参：隐藏提示，Enter 直接执行。
+                // （别名如 /q 保留提示，便于补全为规范形 /quit。）
+                let rest = input.trim_start_matches('/');
+                let cmd = Self::slash_matches_for(kind.key().1);
+                !cmd[0].completion.ends_with(' ')
+                    && !cmd[0].completion.ends_with(':')
+                    && cmd[0].names.first() == Some(&rest)
+            };
+        if matches.is_empty() || done_no_arg {
+            self.slash_hint = None;
+            return;
+        }
         match &mut self.slash_hint {
-            Some(h) if h.filter == filter => {
+            Some(h) if h.kind.key() == kind.key() => {
                 h.selected = h.selected.min(matches.len().saturating_sub(1));
             }
-            _ => self.slash_hint = Some(SlashHint { filter, selected: 0 }),
+            _ => {
+                self.slash_hint = Some(SlashHint {
+                    kind,
+                    selected: 0,
+                })
+            }
         }
+    }
+
+    /// Esc: dismiss the hint for this exact input (it returns if the text
+    /// changes — the dismissal is tied to what was on screen).
+    pub fn dismiss_slash_hint(&mut self) {
+        if self.slash_hint.is_some() {
+            self.slash_dismissed = Some(self.input.text().to_string());
+        }
+        self.slash_hint = None;
     }
 
     /// Move the hint selection (clamp at both ends; no wrap).
     pub fn slash_hint_move(&mut self, delta: isize) {
-        let Some(h) = &mut self.slash_hint else {
-            return;
-        };
-        let len = Self::slash_matches(&format!("/{}" , h.filter)).len();
+        let Some(h) = &self.slash_hint else { return };
+        let len = self.hint_completions(&h.kind).len();
         if len == 0 {
             return;
         }
+        let h = self.slash_hint.as_mut().unwrap();
         h.selected = (h.selected as isize + delta).clamp(0, len as isize - 1) as usize;
     }
 
-    /// Fill the input with the selected command's completion. Returns false
-    /// when there was nothing to complete (the Enter should fall through).
+    /// Fill the input with the selected completion. Returns false when there
+    /// was nothing to complete — or the completion equals the input, in which
+    /// case the Enter should fall through and execute the command.
     pub fn slash_hint_complete(&mut self) -> bool {
-        let Some(h) = &self.slash_hint else {
-            return false;
-        };
-        let matches = Self::slash_matches(self.input.text());
-        let Some(cmd) = matches.get(h.selected) else {
+        let Some(h) = &self.slash_hint else { return false };
+        let completions = self.hint_completions(&h.kind);
+        let Some(completion) = completions.get(h.selected) else {
             self.slash_hint = None;
             return false;
         };
-        let completion = cmd.completion;
+        if completion == self.input.text() {
+            return false; // already complete: let Enter execute
+        }
+        let completion = completion.clone();
         self.input.take();
-        self.input.insert_str(completion);
+        self.input.insert_str(&completion);
         self.slash_hint = None;
         true
     }
@@ -975,7 +1076,13 @@ mod tests {
         let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
         s.input.insert_str("/m");
         s.sync_slash_hint();
-        assert_eq!(s.slash_hint, Some(SlashHint { filter: "m".into(), selected: 0 }));
+        assert_eq!(
+            s.slash_hint,
+            Some(SlashHint {
+                kind: HintKind::Command("m".into()),
+                selected: 0
+            })
+        );
         s.slash_hint_move(1);
         assert_eq!(s.slash_hint.as_ref().unwrap().selected, 1);
         // 过滤器不变：选中保留。
@@ -985,7 +1092,13 @@ mod tests {
         s.input.take();
         s.input.insert_str("/s");
         s.sync_slash_hint();
-        assert_eq!(s.slash_hint, Some(SlashHint { filter: "s".into(), selected: 0 }));
+        assert_eq!(
+            s.slash_hint,
+            Some(SlashHint {
+                kind: HintKind::Command("s".into()),
+                selected: 0
+            })
+        );
         // 收窄到唯一匹配且是完整无参命令 → 提示隐藏（直接 Enter 执行）。
         s.input.take();
         s.input.insert_str("/quit");
@@ -1014,6 +1127,74 @@ mod tests {
         assert_eq!(s.input.text(), "/quit");
         // 无提示时 complete 返回 false。
         assert!(!s.slash_hint_complete());
+    }
+
+    #[test]
+    fn slash_hint_completes_model_and_skill_args() {
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        s.model_names = vec!["deepseek".into(), "kimi".into()];
+        s.skills = vec![
+            crab_core::skills::Skill {
+                name: "tdd".into(),
+                description: "red-green-refactor".into(),
+                dir: std::path::PathBuf::from("/x"),
+                skill_md: std::path::PathBuf::from("/x/SKILL.md"),
+            },
+            crab_core::skills::Skill {
+                name: "review".into(),
+                description: "review the diff".into(),
+                dir: std::path::PathBuf::from("/y"),
+                skill_md: std::path::PathBuf::from("/y/SKILL.md"),
+            },
+        ];
+        // /model <prefix> → provider profiles。
+        s.input.insert_str("/model d");
+        s.sync_slash_hint();
+        assert!(matches!(
+            s.slash_hint,
+            Some(SlashHint { kind: HintKind::ModelArg(_), .. })
+        ));
+        assert!(s.slash_hint_complete());
+        assert_eq!(s.input.text(), "/model deepseek");
+        // 已完成的输入再按 Enter 不应被吞（complete 返回 false → 执行）。
+        s.sync_slash_hint();
+        assert!(!s.slash_hint_complete(), "completion equals input: run it");
+        // /skill:<prefix> → skills（补全带尾随空格等参数）。
+        s.input.take();
+        s.input.insert_str("/skill:t");
+        s.sync_slash_hint();
+        assert!(s.slash_hint_complete());
+        assert_eq!(s.input.text(), "/skill:tdd ");
+        // 别名 /m 同样进入 model 参数模式。
+        s.input.take();
+        s.input.insert_str("/m k");
+        s.sync_slash_hint();
+        assert!(matches!(
+            s.slash_hint,
+            Some(SlashHint { kind: HintKind::ModelArg(_), .. })
+        ));
+        // 没有配置任何 model/skill 时不弹参数提示。
+        let mut bare = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        bare.input.insert_str("/model ");
+        bare.sync_slash_hint();
+        assert_eq!(bare.slash_hint, None);
+    }
+
+    #[test]
+    fn slash_hint_esc_dismissal_survives_until_input_changes() {
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        s.input.insert_str("/m");
+        s.sync_slash_hint();
+        assert!(s.slash_hint.is_some());
+        s.dismiss_slash_hint();
+        assert_eq!(s.slash_hint, None);
+        // 同一输入再 sync（下一帧）不会把弹层拉回来。
+        s.sync_slash_hint();
+        assert_eq!(s.slash_hint, None, "dismissed for this exact input");
+        // 输入一变，提示恢复。
+        s.input.insert_str("o");
+        s.sync_slash_hint();
+        assert!(s.slash_hint.is_some());
     }
 
     #[test]

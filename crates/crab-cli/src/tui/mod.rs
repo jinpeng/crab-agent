@@ -122,6 +122,9 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
         state.status.set_cost(pricer.total());
     }
     state.pricer = Some(pricer);
+    // Argument completion for the slash hint (/model, /skill:).
+    state.model_names = model_names.clone();
+    state.skills = skills.clone();
     state.yolo = gate.is_permissive();
 
     // Errors from agent runs go through the UI channel: printing to stderr
@@ -476,7 +479,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
                 }
             }
             Esc => {
-                state.slash_hint = None;
+                state.dismiss_slash_hint();
                 return None;
             }
             _ => {}

@@ -136,27 +136,79 @@ fn draw_transcript(f: &mut Frame, state: &mut TuiState, area: Rect) {
     }
 }
 
-/// Draw the slash-command hint above the input box (pi-style autocomplete):
-/// matching commands with descriptions, the selection reversed.
+/// Draw the slash-command hint above the input box (pi-style autocomplete).
+/// Three modes: command catalog, `/model ` argument list, `/skill:` argument
+/// list (the latter two with descriptions where available).
 fn draw_slash_hint(f: &mut Frame, state: &TuiState, input_area: Rect) {
     let Some(hint) = &state.slash_hint else {
         return;
     };
-    let matches = TuiState::slash_matches(state.input.text());
-    if matches.is_empty() {
-        return;
+    enum Row {
+        Cmd(&'static str, &'static str),
+        Arg(String, String),
     }
-    // Cap the window; the catalog is small so this is only a safety bound.
+    let (title, rows): (&str, Vec<Row>) = match &hint.kind {
+        super::state::HintKind::Command(filter) => {
+            let cmds = TuiState::slash_matches_for(filter);
+            if cmds.is_empty() {
+                return;
+            }
+            (
+                " commands (↑↓, Enter, Esc) ",
+                cmds.iter()
+                    .map(|c| Row::Cmd(c.names[0], c.desc))
+                    .collect(),
+            )
+        }
+        super::state::HintKind::ModelArg(prefix) => {
+            let names: Vec<&String> = state
+                .model_names
+                .iter()
+                .filter(|n| n.starts_with(prefix.as_str()))
+                .collect();
+            if names.is_empty() {
+                return;
+            }
+            (
+                " models (↑↓, Enter, Esc) ",
+                names.into_iter().map(|n| Row::Arg(n.clone(), String::new())).collect(),
+            )
+        }
+        super::state::HintKind::SkillArg(prefix) => {
+            let skills: Vec<&crab_core::skills::Skill> = state
+                .skills
+                .iter()
+                .filter(|s| s.name.starts_with(prefix.as_str()))
+                .collect();
+            if skills.is_empty() {
+                return;
+            }
+            (
+                " skills (↑↓, Enter, Esc) ",
+                skills
+                    .into_iter()
+                    .map(|s| Row::Arg(s.name.clone(), s.description.clone()))
+                    .collect(),
+            )
+        }
+    };
+    // Cap the window; the catalogs are small so this is only a safety bound.
     let capacity = 6usize;
-    let height = (matches.len().min(capacity) as u16) + 2;
-    let name_w = matches
+    let height = (rows.len().min(capacity) as u16) + 2;
+    let name_w = rows
         .iter()
-        .map(|c| 1 + c.names[0].chars().count() + 1)
+        .map(|r| match r {
+            Row::Cmd(n, _) => 1 + n.chars().count() + 1,
+            Row::Arg(n, _) => 1 + n.chars().count() + 1,
+        })
         .max()
         .unwrap_or(8);
-    let row_w = matches
+    let row_w = rows
         .iter()
-        .map(|c| name_w + 2 + visible_width(c.desc))
+        .map(|r| match r {
+            Row::Cmd(_, d) => name_w + 2 + visible_width(d),
+            Row::Arg(_, d) => name_w + 2 + visible_width(d),
+        })
         .max()
         .unwrap_or(20);
     let width = (row_w as u16 + 4).clamp(24, input_area.width.max(24));
@@ -169,15 +221,22 @@ fn draw_slash_hint(f: &mut Frame, state: &TuiState, input_area: Rect) {
     };
     f.render_widget(Clear, area);
 
-    let lines: Vec<Line> = matches
+    let lines: Vec<Line> = rows
         .iter()
         .take(capacity)
         .enumerate()
-        .map(|(i, c)| {
-            let name = format!("/{:<width$}", c.names[0], width = name_w - 1);
+        .map(|(i, r)| {
+            let (name, desc) = match r {
+                Row::Cmd(n, d) => (n.to_string(), d.to_string()),
+                Row::Arg(n, d) => (n.clone(), d.clone()),
+            };
             let line = Line::from(vec![
-                Span::styled(name, Theme::tool_name()),
-                Span::styled(c.desc.to_string(), Theme::dim()),
+                Span::styled(format!("/{name}"), Theme::tool_name()),
+                if desc.is_empty() {
+                    Span::raw("")
+                } else {
+                    Span::styled(format!("  {desc}"), Theme::dim())
+                },
             ]);
             if i == hint.selected {
                 line.style(Style::default().add_modifier(Modifier::REVERSED))
@@ -186,9 +245,7 @@ fn draw_slash_hint(f: &mut Frame, state: &TuiState, input_area: Rect) {
             }
         })
         .collect();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" commands (↑↓, Enter, Esc) ");
+    let block = Block::default().borders(Borders::ALL).title(title);
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -647,6 +704,49 @@ mod tests {
         s2.input.insert_str("hi");
         let rows2 = render_frame(&mut s2, 60, 14);
         assert!(!rows2.join("\n").contains("commands"));
+    }
+
+    /// `/model ` and `/skill:` switch the hint to argument lists.
+    #[test]
+    fn slash_hint_lists_model_and_skill_args() {
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.model_names = vec!["deepseek".into(), "kimi".into()];
+        s.skills = vec![crab_core::skills::Skill {
+            name: "tdd".into(),
+            description: "red-green-refactor".into(),
+            dir: std::path::PathBuf::from("/x"),
+            skill_md: std::path::PathBuf::from("/x/SKILL.md"),
+        }];
+        s.input.insert_str("/model ");
+        let rows = render_frame(&mut s, 60, 14);
+        let input_top = rows
+            .iter()
+            .position(|r| r.contains("crab>"))
+            .expect("input line")
+            - 1;
+        let popup: String = rows[input_top - 4..input_top].join("\n");
+        assert!(popup.contains("models"), "{popup:?}");
+        assert!(popup.contains("deepseek"), "{popup:?}");
+        assert!(popup.contains("kimi"), "{popup:?}");
+
+        let mut s2 = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s2.skills = vec![crab_core::skills::Skill {
+            name: "tdd".into(),
+            description: "red-green-refactor".into(),
+            dir: std::path::PathBuf::from("/x"),
+            skill_md: std::path::PathBuf::from("/x/SKILL.md"),
+        }];
+        s2.input.insert_str("/skill:");
+        let rows2 = render_frame(&mut s2, 60, 14);
+        let input_top2 = rows2
+            .iter()
+            .position(|r| r.contains("crab>"))
+            .expect("input line")
+            - 1;
+        let popup2: String = rows2[input_top2 - 4..input_top2].join("\n");
+        assert!(popup2.contains("skills"), "{popup2:?}");
+        assert!(popup2.contains("tdd"), "{popup2:?}");
+        assert!(popup2.contains("red-green-refactor"), "{popup2:?}");
     }
 
     /// Draw and return the transcript rows, without the scrollbar column.
