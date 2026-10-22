@@ -48,6 +48,9 @@ pub struct Startup {
     /// order. The TUI replays them into bubbles so `--continue` shows the
     /// session, not an empty transcript.
     pub replay: Vec<crab_core::types::Message>,
+    /// Cumulative token counters replayed from the log — seeds the status
+    /// line on `--continue` so ↑↓R/W don't restart at zero.
+    pub usage_totals: crab_core::obs::LlmUsage,
 }
 
 impl From<&crate::Cli> for AppConfig {
@@ -212,6 +215,7 @@ pub async fn build_agent(
         skills,
         context_used,
         replay,
+        usage_totals: crab_core::meter::usage_totals(&session_entries_snapshot),
     })
 }
 

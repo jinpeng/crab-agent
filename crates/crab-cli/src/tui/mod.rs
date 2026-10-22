@@ -59,6 +59,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
         skills,
         context_used,
         replay,
+        usage_totals,
     } = startup;
     // Best-effort metrics sink (independent broadcast receiver).
     crate::spawn_metrics_sink(&mut agent, &provider);
@@ -109,6 +110,9 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     for msg in &replay {
         state.replay_message(msg);
     }
+    // Seed the token counters from the log too — the status line resumes
+    // where the session left off (↑↓R/W), rather than restarting at zero.
+    state.status.seed_usage(usage_totals);
     state.yolo = gate.is_permissive();
 
     // Errors from agent runs go through the UI channel: printing to stderr

@@ -495,6 +495,25 @@ mod tests {
         assert!(status_row.contains("CH66%/128.0k"), "{status_row:?}");
     }
 
+    /// `--continue` also seeds the cumulative counters: the first frame shows
+    /// ↑↓ and R/W from the replayed log, not zeros.
+    #[test]
+    fn seeded_usage_counters_show_on_first_frame() {
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.status.seed_usage(crab_core::obs::LlmUsage {
+            prompt: 50_000,
+            completion: 5_000,
+            cache_read: 40_000,
+            cache_write: 100,
+        });
+        let rows = render_frame(&mut s, 80, 12);
+        let status_row = &rows[rows.len() - 1];
+        assert!(
+            status_row.contains("↑50.0k ↓5.0k R40.0k W100"),
+            "{status_row:?}"
+        );
+    }
+
     /// 消息之间有空行分隔（pi 式呼吸感），bubble 内部行保持紧凑。
     #[test]
     fn bubbles_are_separated_by_a_blank_row() {

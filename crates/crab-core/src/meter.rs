@@ -54,8 +54,64 @@ pub fn prompt_sizes(entries: &[SessionEntry]) -> Vec<u64> {
         .collect()
 }
 
+/// Cumulative four-way usage across every LlmCall that carried usage.
+/// Seeds the status-line counters on `--continue` so they don't restart
+/// at zero (context occupancy is seeded separately via `context_used`).
+pub fn usage_totals(entries: &[SessionEntry]) -> crate::obs::LlmUsage {
+    entries
+        .iter()
+        .fold(crate::obs::LlmUsage::default(), |acc, e| match e {
+            SessionEntry::Obs {
+                event:
+                    crate::obs::ObsEvent {
+                        body: ObsBody::LlmCall {
+                            usage: Some(u), ..
+                        },
+                        ..
+                    },
+                ..
+            } => crate::obs::LlmUsage {
+                prompt: acc.prompt.saturating_add(u.prompt),
+                completion: acc.completion.saturating_add(u.completion),
+                cache_read: acc.cache_read.saturating_add(u.cache_read),
+                cache_write: acc.cache_write.saturating_add(u.cache_write),
+            },
+            _ => acc,
+        })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_totals_sum_four_way_and_skip_missing() {
+        let entries = vec![
+            llm_call(Some(crate::obs::LlmUsage {
+                prompt: 1000,
+                completion: 100,
+                cache_read: 800,
+                cache_write: 0,
+            })),
+            llm_call(None),
+            llm_call(Some(crate::obs::LlmUsage {
+                prompt: 500,
+                completion: 50,
+                cache_read: 400,
+                cache_write: 10,
+            })),
+        ];
+        let t = usage_totals(&entries);
+        assert_eq!(
+            t,
+            crate::obs::LlmUsage {
+                prompt: 1500,
+                completion: 150,
+                cache_read: 1200,
+                cache_write: 10,
+            }
+        );
+        assert_eq!(usage_totals(&[]), crate::obs::LlmUsage::default());
+    }
+
     #[test]
     fn prompt_sizes_collects_usage_carrying_calls_in_order() {
         let entries = vec![

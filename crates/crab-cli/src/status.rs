@@ -90,6 +90,16 @@ impl StatusLine {
         self.context_used = Some(u.prompt as u64);
     }
 
+    /// Seed cumulative counters from a replayed session (`--continue`) without
+    /// touching the context estimate — occupancy is seeded separately via
+    /// `set_context`, and a seed must not masquerade as the latest prompt.
+    pub fn seed_usage(&mut self, u: crab_core::obs::LlmUsage) {
+        self.tokens_in += u.prompt as u64;
+        self.tokens_out += u.completion as u64;
+        self.cache_read += u.cache_read as u64;
+        self.cache_write += u.cache_write as u64;
+    }
+
     /// Replace the cached git branch (refreshed by the TUI's async task).
     pub fn set_branch(&mut self, branch: Option<String>) {
         self.branch = branch;
@@ -260,6 +270,28 @@ mod tests {
         assert_eq!(s.cache_read, 100);
         assert_eq!(s.cache_write, 10);
         assert_eq!(s.context_used, Some(300), "context tracks the latest prompt size");
+    }
+
+    #[test]
+    fn seed_usage_adds_counters_but_keeps_context_untouched() {
+        let mut s = StatusLine::new("m".into(), PathBuf::from("/"));
+        s.seed_usage(crab_core::obs::LlmUsage {
+            prompt: 50_000,
+            completion: 5_000,
+            cache_read: 40_000,
+            cache_write: 100,
+        });
+        assert_eq!(s.tokens_in, 50_000);
+        assert_eq!(s.tokens_out, 5_000);
+        assert_eq!(s.cache_read, 40_000);
+        assert_eq!(s.cache_write, 100);
+        assert_eq!(s.context_used, None, "a seed must not fake the latest prompt");
+        // 后续 add_usage 照常刷新 context。
+        s.add_usage(crab_core::obs::LlmUsage {
+            prompt: 100,
+            ..Default::default()
+        });
+        assert_eq!(s.context_used, Some(100));
     }
 
     #[test]
