@@ -30,6 +30,16 @@ pub struct ObsEvent {
     pub body: ObsBody,
 }
 
+/// How a compaction condensed the prefix (spec §2).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStrategy {
+    /// Deterministic: tool results shed, long text truncated (spec §5).
+    Shed,
+    /// Prefix replaced by an LLM-written summary (spec §6).
+    Summarize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "obs", rename_all = "snake_case")]
 pub enum ObsBody {
@@ -57,6 +67,17 @@ pub enum ObsBody {
         duration_ms: u64,
         outcome: ObsOutcome,
     },
+    /// One compaction pass. `up_to` is the EntryId of the last message folded
+    /// into the compressed view; the durable log itself is never modified
+    /// (日志即真相，视图可重建 — replay this event to rebuild the view).
+    Compacted {
+        up_to: crate::types::EntryId,
+        strategy: CompactionStrategy,
+        shed_tool_results: u32,
+        turns_affected: u32,
+        /// `Some` iff strategy == Summarize. Inline, 单文件原则.
+        summary: Option<String>,
+    },
 }
 
 /// Canonical-json digest (blake3, first 8 hex chars): object keys are sorted
@@ -82,6 +103,27 @@ mod tests {
         };
         let s = serde_json::to_string(&u).unwrap();
         assert_eq!(serde_json::from_str::<LlmUsage>(&s).unwrap(), u);
+    }
+
+    #[test]
+    fn compacted_event_roundtrips() {
+        let e = ObsEvent {
+            run_id: 3,
+            ts: 42,
+            body: ObsBody::Compacted {
+                up_to: 17,
+                strategy: CompactionStrategy::Summarize,
+                shed_tool_results: 12,
+                turns_affected: 6,
+                summary: Some("we decided X".into()),
+            },
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["obs"], "compacted");
+        assert_eq!(v["up_to"], 17);
+        assert_eq!(v["strategy"], "summarize");
+        assert_eq!(serde_json::from_str::<ObsEvent>(&s).unwrap(), e);
     }
 
     #[test]

@@ -713,7 +713,7 @@ Expected: 全部 PASS
 
 ```rust
     #[tokio::test]
-    async fn compactions_shrink_the_request_view_not_the_history() {
+    async fn summarize_compaction_shrinks_the_request_view_not_the_history() {
         let provider = MockProvider::new(vec![vec![
             StreamEvent::TextDelta("ok".into()),
             StreamEvent::StreamEnd { reason: StopReason::EndTurn },
@@ -724,8 +724,8 @@ Expected: 全部 PASS
         let mut config = AgentConfig::default();
         config.compactions = vec![crate::compact::AppliedCompaction {
             keep_from: 2,
-            strategy: crate::obs::CompactionStrategy::Shed,
-            summary: None,
+            strategy: crate::obs::CompactionStrategy::Summarize,
+            summary: Some("earlier we chose X".into()),
         }];
         let mut agent = Agent::new(Box::new(provider), tools, session, config);
         // 预置 3 对历史（直接推入，绕过 run）
@@ -738,10 +738,12 @@ Expected: 全部 PASS
         agent.run("go".into()).await.unwrap();
         let calls = agent.provider_calls();
         let req = calls.last().unwrap();
-        // system(1) + view(3+1=4 条：2 shed + 落单 u + a) …… 关键断言：
-        // 请求里不出现 prefix 的完整文本（shed 生效），history 本身仍是 7 条
-        assert!(agent.history().len() >= 7);
-        assert!(req.iter().all(|m| !m.content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text == "u0"))));
+        // history 保持全量（7 条：3 对 + 当前输入）
+        assert_eq!(agent.history().len(), 7);
+        // 请求视图缩为 6 条：1 条 summary + 5 条后缀；prefix 原文不在请求里
+        assert_eq!(req.len(), 6, "{req:?}");
+        assert!(!req.iter().any(|m| m.content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text == "u0"))));
+        assert!(req[0].content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text.contains("[Earlier conversation summary]"))));
     }
 ```
 
@@ -832,10 +834,11 @@ Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
 ```rust
     use crate::obs::CompactionStrategy;
 
-    fn big_usage_turn() -> Vec<StreamEvent> {
+    /// 一次纯文本 turn，带指定 prompt 数的 usage
+    fn usage_turn(prompt_tokens: u32) -> Vec<StreamEvent> {
         vec![
             StreamEvent::TextDelta("working".into()),
-            StreamEvent::Usage { prompt_tokens: 100_000, completion_tokens: 100,
+            StreamEvent::Usage { prompt_tokens, completion_tokens: 10,
                 cache_read_tokens: 0, cache_write_tokens: 0 },
             StreamEvent::StreamEnd { reason: StopReason::EndTurn },
         ]
@@ -843,21 +846,30 @@ Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
 
     #[tokio::test]
     async fn auto_compaction_fires_when_prompt_crosses_threshold() {
-        // 窗口 128k × 0.8 = 102.4k；第一轮 prompt 100k 不触发，脚本第二轮给 110k
-        let provider = MockProvider::new(vec![big_usage_turn(), vec![
-            StreamEvent::Usage { prompt_tokens: 110_000, completion_tokens: 10,
-                cache_read_tokens: 0, cache_write_tokens: 0 },
-            StreamEvent::StreamEnd { reason: StopReason::EndTurn },
-        ]]);
+        // 窗口 100k × 0.8 = 80k。触发用上一轮的 usage 在本轮 loop 顶判定：
+        // run0(60k)→run1(80k，不严格大于)→run2(100k)；run3 的 loop 顶触发。
+        // 注意 plan 按 prompt 增量计费：平的序列会让后缀"免费"，所以 usage 必须递增。
+        let provider = MockProvider::new(vec![
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+            vec![ // 摘要调用（need_summary 成立时消费）
+                StreamEvent::TextDelta("summary of earlier work".into()),
+                StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+            ],
+            usage_turn(50_000),
+        ]);
         let mut config = AgentConfig::default();
-        config.context_window = Some(128_000);
+        config.context_window = Some(100_000);
         config.auto_compact_threshold = 0.8;
         let tools = ToolRegistry::new();
         let dir = tempfile::tempdir().unwrap();
         let session = crate::session::Session::create(dir.path()).unwrap();
         let mut agent = Agent::new(Box::new(provider), tools, session, config);
-        agent.run("start".into()).await.unwrap(); // turn0: 100k（不触发）
-        agent.run("more".into()).await.unwrap();  // turn1 前：110k > 102.4k → 压缩
+        agent.run("start".into()).await.unwrap(); // turn0: 60k
+        agent.run("more".into()).await.unwrap();  // turn1: 80k（不触发）
+        agent.run("again".into()).await.unwrap(); // turn2: 100k
+        agent.run("third".into()).await.unwrap(); // loop 顶：100k > 80k → 压缩
         let bodies = obs_bodies(&agent);
         assert!(bodies.iter().any(|(_, b)| matches!(b, crate::obs::ObsBody::Compacted { .. })),
             "expected a Compacted event, got {bodies:?}");
@@ -866,11 +878,23 @@ Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
 
     #[tokio::test]
     async fn compact_now_sheds_and_appends_only_one_obs_line() {
-        let provider = MockProvider::new(vec![big_usage_turn()]);
+        // run0 用带 tool 的脚本（产生 ToolResult 供 shed），其第二次调用接 usage_turn(60k)；
+        // run1/run2 各一次 usage_turn。usage 递增 → plan 的增量计费有效。
+        let provider = MockProvider::new(vec![
+            tool_turn(),
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+            vec![ // need_summary 成立时的摘要调用
+                StreamEvent::TextDelta("summary text".into()),
+                StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+            ],
+        ]);
         let mut config = AgentConfig::default();
-        config.context_window = Some(10_000); // 小窗口 → 必然触发摘要需求
+        config.context_window = Some(10_000); // 小窗口 → keep_from > 0
         config.auto_compact_threshold = 0.0;
         let tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
         let dir = tempfile::tempdir().unwrap();
         let session = crate::session::Session::create(dir.path()).unwrap();
         let path = session.path().to_path_buf();
@@ -887,9 +911,11 @@ Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
         let added = after[before.len()..].trim();
         assert_eq!(added.lines().count(), 1, "expected exactly one new line");
         assert!(added.contains("compacted"), "{added}");
-        // 视图确实缩小：view 的 tool_result 被 shed 或 prefix 被摘要替换
+        // shed 生效：视图里出现占位符（块不删，只换内容——视图长度不变）
         let v = crate::compact::view(agent.history(), &agent.compactions);
-        assert!(v.len() < agent.history().len());
+        assert_eq!(v.len(), agent.history().len());
+        assert!(v.iter().flat_map(|m| &m.content).any(|b| matches!(b,
+            crate::types::ContentBlock::ToolResult { content, .. } if content.contains("[shed:"))));
     }
 
     #[tokio::test]
@@ -907,7 +933,11 @@ Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
             fn label(&self) -> &str { "fail" }
             fn model(&self) -> &str { "fail" }
         }
-        let provider = MockProvider::new(vec![big_usage_turn()]);
+        let provider = MockProvider::new(vec![
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+        ]);
         let mut config = AgentConfig::default();
         config.context_window = Some(10_000);
         let tools = ToolRegistry::new();
@@ -916,6 +946,7 @@ Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
         let mut agent = Agent::new(Box::new(provider), tools, session, config);
         agent.run("x".into()).await.unwrap();
         agent.run("y".into()).await.unwrap();
+        agent.run("z".into()).await.unwrap(); // 3 对 → plan 不会前置返回
         agent.set_provider(Box::new(Fail));
         let report = agent.compact_now().await;
         assert_eq!(report.strategy, CompactionStrategy::Shed);
