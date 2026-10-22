@@ -454,6 +454,35 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
         return None;
     }
 
+    // Slash-command hint (pi-style autocomplete) takes precedence while open:
+    // ↑↓ navigate, Enter completes (consumed — press Enter again to run),
+    // Esc dismisses. Synced first so the hint reflects the input before
+    // this key. Esc closes the hint rather than aborting a run — a visible
+    // popup means the user's intent is local.
+    state.sync_slash_hint();
+    if state.slash_hint.is_some() {
+        match code {
+            Up => {
+                state.slash_hint_move(-1);
+                return None;
+            }
+            Down => {
+                state.slash_hint_move(1);
+                return None;
+            }
+            Enter => {
+                if state.slash_hint_complete() {
+                    return None;
+                }
+            }
+            Esc => {
+                state.slash_hint = None;
+                return None;
+            }
+            _ => {}
+        }
+    }
+
     // Esc aborts the running turn (the pi-style interrupt). When idle it is
     // unbound here — pickers and the confirm modal handle their own Esc first.
     if code == Esc && state.is_running() {

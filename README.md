@@ -55,7 +55,8 @@ Or start the interactive session:
 crab
 ```
 
-The prompt is `crab> `. Slash commands:
+The prompt is `crab> `. Type `/` to browse slash commands with descriptions
+(↑↓ to choose, Enter to complete, Esc to dismiss). Slash commands:
 
 | command | effect |
 | --- | --- |

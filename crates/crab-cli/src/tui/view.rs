@@ -12,9 +12,11 @@ use ratatui::{
 
 use super::select;
 use super::state::{Picker, Theme, TuiState, visible_window};
+use crate::width::visible_width;
 
 /// Draw the full TUI.
 pub fn draw(f: &mut Frame, state: &mut TuiState) {
+    state.sync_slash_hint();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -28,6 +30,7 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
     draw_transcript(f, state, chunks[0]);
     draw_input(f, state, chunks[1]);
     draw_status_rows(f, state, &chunks[2..]);
+    draw_slash_hint(f, state, chunks[1]);
 
     // Draw confirm modal on top if active
     if state.confirm.is_some() {
@@ -131,6 +134,62 @@ fn draw_transcript(f: &mut Frame, state: &mut TuiState, area: Rect) {
             .style(Theme::dim());
         f.render_stateful_widget(scrollbar, area, &mut bar);
     }
+}
+
+/// Draw the slash-command hint above the input box (pi-style autocomplete):
+/// matching commands with descriptions, the selection reversed.
+fn draw_slash_hint(f: &mut Frame, state: &TuiState, input_area: Rect) {
+    let Some(hint) = &state.slash_hint else {
+        return;
+    };
+    let matches = TuiState::slash_matches(state.input.text());
+    if matches.is_empty() {
+        return;
+    }
+    // Cap the window; the catalog is small so this is only a safety bound.
+    let capacity = 6usize;
+    let height = (matches.len().min(capacity) as u16) + 2;
+    let name_w = matches
+        .iter()
+        .map(|c| 1 + c.names[0].chars().count() + 1)
+        .max()
+        .unwrap_or(8);
+    let row_w = matches
+        .iter()
+        .map(|c| name_w + 2 + visible_width(c.desc))
+        .max()
+        .unwrap_or(20);
+    let width = (row_w as u16 + 4).clamp(24, input_area.width.max(24));
+    let y = input_area.y.saturating_sub(height);
+    let area = Rect {
+        x: input_area.x,
+        y,
+        width: width.min(input_area.width),
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let lines: Vec<Line> = matches
+        .iter()
+        .take(capacity)
+        .enumerate()
+        .map(|(i, c)| {
+            let name = format!("/{:<width$}", c.names[0], width = name_w - 1);
+            let line = Line::from(vec![
+                Span::styled(name, Theme::tool_name()),
+                Span::styled(c.desc.to_string(), Theme::dim()),
+            ]);
+            if i == hint.selected {
+                line.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" commands (↑↓, Enter, Esc) ");
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Draw the two status rows below the input box (pi-style): the cwd+branch
@@ -565,6 +624,31 @@ mod tests {
         assert_eq!(s.select_finish(), None);
     }
 
+    /// Slash hint: typing `/m` pops the command list above the input box;
+    /// the selected row is highlighted, descriptions visible.
+    #[test]
+    fn slash_hint_pops_above_the_input_box() {
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.input.insert_str("/m");
+        let rows = render_frame(&mut s, 60, 14);
+        // 输入框顶边框：找 "crab>" 提示行再往上（弹层自己也有 ┌，不能用它定位）。
+        let input_top = rows
+            .iter()
+            .position(|r| r.contains("crab>"))
+            .expect("input line")
+            - 1;
+        assert!(input_top >= 3, "popup needs room above the input: {rows:?}");
+        let popup: String = rows[input_top - 3..input_top].join("\n");
+        assert!(popup.contains("/model"), "{popup:?}");
+        assert!(popup.contains("/models"), "{popup:?}");
+        assert!(popup.contains("switch provider profile"), "{popup:?}");
+        // 无 slash 输入 → 无弹层。
+        let mut s2 = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s2.input.insert_str("hi");
+        let rows2 = render_frame(&mut s2, 60, 14);
+        assert!(!rows2.join("\n").contains("commands"));
+    }
+
     /// Draw and return the transcript rows, without the scrollbar column.
     fn render(state: &mut TuiState, w: u16, h: u16) -> Vec<String> {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -638,4 +722,5 @@ mod tests {
         assert!(centered.y < 30);
     }
 }
+
 

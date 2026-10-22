@@ -239,6 +239,64 @@ pub enum SlashCommand {
     Unknown(String),
 }
 
+/// A slash command offered by the input hint (pi-style autocomplete).
+pub struct SlashCmd {
+    /// All spellings; the first is canonical. Aliases match too (`/q`).
+    pub names: &'static [&'static str],
+    pub desc: &'static str,
+    /// What completing fills the input with; a trailing space/`:` means
+    /// arguments are expected after it.
+    pub completion: &'static str,
+}
+
+/// The command catalog for the slash hint, in display order.
+pub const SLASH_COMMANDS: &[SlashCmd] = &[
+    SlashCmd {
+        names: &["quit", "exit", "q"],
+        desc: "leave crab",
+        completion: "/quit",
+    },
+    SlashCmd {
+        names: &["yolo"],
+        desc: "auto-approve every tool call for the session",
+        completion: "/yolo",
+    },
+    SlashCmd {
+        names: &["model"],
+        desc: "switch provider profile: /model <name>",
+        completion: "/model ",
+    },
+    SlashCmd {
+        names: &["models"],
+        desc: "pick a provider profile from a list",
+        completion: "/models",
+    },
+    SlashCmd {
+        names: &["skills"],
+        desc: "pick a skill from a list",
+        completion: "/skills",
+    },
+    SlashCmd {
+        names: &["skill"],
+        desc: "load a skill: /skill:<name> [args]",
+        completion: "/skill:",
+    },
+    SlashCmd {
+        names: &["compact"],
+        desc: "compact the conversation now",
+        completion: "/compact",
+    },
+];
+
+/// Live slash-command hint: which filter produced it + the selection.
+/// Synced from the input at draw/key time; the selection survives only
+/// while the filter text is unchanged.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SlashHint {
+    pub filter: String,
+    pub selected: usize,
+}
+
 /// Parse a slash command line (leading `/` already stripped of surrounding space).
 /// Pure and total: never panics, unknown commands fall through to `Unknown`.
 pub fn parse_slash(text: &str) -> Option<SlashCommand> {
@@ -346,6 +404,8 @@ pub struct TuiState {
     /// Live cost fold for the status line's `$` segment (pi parity). None in
     /// contexts without pricing (created by the TUI after construction).
     pub pricer: Option<crate::metrics::Pricer>,
+    /// Slash-command hint (pi-style autocomplete), synced from the input.
+    pub slash_hint: Option<SlashHint>,
 }
 
 impl TuiState {
@@ -376,6 +436,7 @@ impl TuiState {
             selection: None,
             select_grid: None,
             pricer: None,
+            slash_hint: None,
         }
     }
 
@@ -548,6 +609,80 @@ impl TuiState {
         let grid = self.select_grid.as_ref()?;
         let sel = self.selection?;
         (sel.anchor != sel.focus).then(|| super::select::extract(&grid.rows, &sel))
+    }
+
+    // ---- slash-command hint (pi-style autocomplete) ----
+
+    /// Commands matching the input's command token (`/` + prefix, no args
+    /// yet). Empty for non-slash input or once arguments are being typed.
+    pub fn slash_matches(input: &str) -> Vec<&'static SlashCmd> {
+        let Some(rest) = input.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if rest.contains(char::is_whitespace) || rest.contains(':') {
+            return Vec::new();
+        }
+        SLASH_COMMANDS
+            .iter()
+            .filter(|c| c.names.iter().any(|n| n.starts_with(rest)))
+            .collect()
+    }
+
+    /// Refresh the hint from the current input. Keeps the selection while the
+    /// filter is unchanged, resets it when the text changes, hides the hint
+    /// when nothing matches or the input is already a complete no-arg command.
+    pub fn sync_slash_hint(&mut self) {
+        let input = self.input.text().to_string();
+        let matches = Self::slash_matches(&input);
+        let done_no_arg = matches.len() == 1 && {
+            // 完整输入了规范形且无参：隐藏提示，Enter 直接执行。
+            // （别名如 /q 保留提示，便于补全为规范形 /quit。）
+            let rest = input.trim_start_matches('/');
+            !matches[0].completion.ends_with(' ')
+                && !matches[0].completion.ends_with(':')
+                && matches[0].names.first() == Some(&rest)
+        };
+        if !input.starts_with('/') || matches.is_empty() || done_no_arg {
+            self.slash_hint = None;
+            return;
+        }
+        let filter = input[1..].to_string();
+        match &mut self.slash_hint {
+            Some(h) if h.filter == filter => {
+                h.selected = h.selected.min(matches.len().saturating_sub(1));
+            }
+            _ => self.slash_hint = Some(SlashHint { filter, selected: 0 }),
+        }
+    }
+
+    /// Move the hint selection (clamp at both ends; no wrap).
+    pub fn slash_hint_move(&mut self, delta: isize) {
+        let Some(h) = &mut self.slash_hint else {
+            return;
+        };
+        let len = Self::slash_matches(&format!("/{}" , h.filter)).len();
+        if len == 0 {
+            return;
+        }
+        h.selected = (h.selected as isize + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    /// Fill the input with the selected command's completion. Returns false
+    /// when there was nothing to complete (the Enter should fall through).
+    pub fn slash_hint_complete(&mut self) -> bool {
+        let Some(h) = &self.slash_hint else {
+            return false;
+        };
+        let matches = Self::slash_matches(self.input.text());
+        let Some(cmd) = matches.get(h.selected) else {
+            self.slash_hint = None;
+            return false;
+        };
+        let completion = cmd.completion;
+        self.input.take();
+        self.input.insert_str(completion);
+        self.slash_hint = None;
+        true
     }
 
     /// Apply an agent event to update state.
@@ -815,6 +950,70 @@ mod tests {
 
     fn msg(role: crab_core::types::Role, content: Vec<crab_core::types::ContentBlock>) -> crab_core::types::Message {
         crab_core::types::Message { role, content }
+    }
+
+    #[test]
+    fn slash_matches_filters_by_prefix_and_stops_at_args() {
+        // "/" alone: full catalog.
+        assert_eq!(TuiState::slash_matches("/").len(), SLASH_COMMANDS.len());
+        // 前缀过滤：/m → model + models。
+        let m: Vec<_> = TuiState::slash_matches("/m").iter().map(|c| c.names[0]).collect();
+        assert_eq!(m, vec!["model", "models"]);
+        // 别名匹配：/q → quit。
+        assert_eq!(TuiState::slash_matches("/q")[0].names[0], "quit");
+        // 进入参数部分（空格或冒号）后不再提示。
+        assert!(TuiState::slash_matches("/model gpt").is_empty());
+        assert!(TuiState::slash_matches("/skill:").is_empty());
+        // 非 slash 输入没有提示。
+        assert!(TuiState::slash_matches("hello").is_empty());
+        // 无匹配。
+        assert!(TuiState::slash_matches("/zzz").is_empty());
+    }
+
+    #[test]
+    fn slash_hint_resets_selection_when_filter_changes_and_clamps() {
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        s.input.insert_str("/m");
+        s.sync_slash_hint();
+        assert_eq!(s.slash_hint, Some(SlashHint { filter: "m".into(), selected: 0 }));
+        s.slash_hint_move(1);
+        assert_eq!(s.slash_hint.as_ref().unwrap().selected, 1);
+        // 过滤器不变：选中保留。
+        s.sync_slash_hint();
+        assert_eq!(s.slash_hint.as_ref().unwrap().selected, 1);
+        // 过滤器变化：重置为 0。
+        s.input.take();
+        s.input.insert_str("/s");
+        s.sync_slash_hint();
+        assert_eq!(s.slash_hint, Some(SlashHint { filter: "s".into(), selected: 0 }));
+        // 收窄到唯一匹配且是完整无参命令 → 提示隐藏（直接 Enter 执行）。
+        s.input.take();
+        s.input.insert_str("/quit");
+        s.sync_slash_hint();
+        assert_eq!(s.slash_hint, None);
+        // 非 slash 输入 → 无提示。
+        s.input.take();
+        s.input.insert_str("hi");
+        s.sync_slash_hint();
+        assert_eq!(s.slash_hint, None);
+    }
+
+    #[test]
+    fn slash_hint_complete_fills_input_with_canonical_form() {
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        s.input.insert_str("/mo");
+        s.sync_slash_hint();
+        assert!(s.slash_hint_complete());
+        assert_eq!(s.input.text(), "/model ", "first match, args expected");
+        assert_eq!(s.slash_hint, None);
+        // 别名也补全为规范形。
+        s.input.take();
+        s.input.insert_str("/q");
+        s.sync_slash_hint();
+        assert!(s.slash_hint_complete());
+        assert_eq!(s.input.text(), "/quit");
+        // 无提示时 complete 返回 false。
+        assert!(!s.slash_hint_complete());
     }
 
     #[test]
