@@ -25,7 +25,11 @@ cargo install --path crates/crab-cli
 ```
 
 This installs a binary named `crab`. You need a Rust toolchain — the workspace
-pins one in `rust-toolchain.toml` (rustfmt + clippy included).
+pins one in `rust-toolchain.toml` (rustfmt + clippy included). Two gotchas:
+re-installing the same version needs `cargo install --force --path crates/crab-cli`,
+and building from git (`cargo install --git …`) re-resolves all dependencies
+from crates.io — it needs network even when a local build works. No Rust
+handy? Use `install.sh` to download a precompiled binary instead.
 
 ## Quickstart
 
