@@ -2,6 +2,7 @@
 //! plan 决策、view 变换都不碰 IO、不碰模型；agent loop 是薄适配器。
 
 use crate::obs::CompactionStrategy;
+use crate::session::SessionEntry;
 use crate::types::{ContentBlock, Message, ToolCallId};
 use std::collections::HashMap;
 
@@ -39,6 +40,85 @@ pub fn shed_message(m: &Message, tool_names: &HashMap<ToolCallId, String>) -> Me
         })
         .collect();
     Message { role: m.role, content }
+}
+
+/// 构造发送给 provider 的 history 视图（spec §3）。
+/// 只认最后一条 AppliedCompaction（水位线单调，last-wins）；空列表 = 全量直通。
+pub fn view(history: &[Message], compactions: &[AppliedCompaction]) -> Vec<Message> {
+    let Some(last) = compactions.last() else {
+        return history.to_vec();
+    };
+    debug_assert!(
+        last.keep_from % 2 == 0,
+        "watermark must sit on a user boundary"
+    );
+    let (prefix, suffix) = history.split_at(last.keep_from.min(history.len()));
+    match (&last.strategy, &last.summary) {
+        (CompactionStrategy::Summarize, Some(summary)) => {
+            let mut v = Vec::with_capacity(suffix.len() + 1);
+            v.push(Message {
+                role: crate::types::Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "[Earlier conversation summary]".into(),
+                    },
+                    ContentBlock::Text { text: summary.clone() },
+                ],
+            });
+            v.extend_from_slice(suffix);
+            v
+        }
+        _ => {
+            // Shed：prefix 逐条确定性瘦身，suffix 原样
+            let mut names: HashMap<ToolCallId, String> = HashMap::new();
+            for m in prefix {
+                for b in &m.content {
+                    if let ContentBlock::ToolUse { id, name, .. } = b {
+                        names.insert(id.clone(), name.clone());
+                    }
+                }
+            }
+            prefix
+                .iter()
+                .map(|m| shed_message(m, &names))
+                .chain(suffix.iter().cloned())
+                .collect()
+        }
+    }
+}
+
+/// 从 session entries 重放 Compacted 事件（--continue 路径，spec §2）。
+/// up_to 是 Message 条目的 EntryId；keep_from = id ≤ up_to 的 Message 条数。
+/// up_to 找不到对应条目的事件跳过（防御坏日志）。
+pub fn resolve(entries: &[SessionEntry]) -> Vec<AppliedCompaction> {
+    let mut out = Vec::new();
+    for e in entries {
+        if let SessionEntry::Obs {
+            event:
+                crate::obs::ObsEvent {
+                    body:
+                        crate::obs::ObsBody::Compacted {
+                            up_to, strategy, summary, ..
+                        },
+                    ..
+                },
+            ..
+        } = e
+        {
+            let hits = entries
+                .iter()
+                .filter(|x| matches!(x, SessionEntry::Message { id, .. } if id <= up_to))
+                .count();
+            if hits > 0 {
+                out.push(AppliedCompaction {
+                    keep_from: hits,
+                    strategy: *strategy,
+                    summary: summary.clone(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// 压缩预算（spec §3）。
@@ -176,6 +256,109 @@ mod tests {
 
     use crate::types::ToolCallId;
     use std::collections::HashMap;
+
+    use crate::obs::{ObsBody, ObsEvent};
+    use crate::session::Session;
+
+    /// 样例历史：3 个结构对，第 0 个含 tool_use/tool_result 配对
+    fn sample_history() -> Vec<Message> {
+        vec![
+            user("please read the file"),
+            assistant_tool_use("c1"),
+            user_tool_result("c1", &"data".repeat(5000)),
+            assistant("done reading"),
+            user("now summarize"),
+            assistant("summary here"),
+        ]
+    }
+
+    /// wire 不变式：视图以 user 起始；每个 tool_use 在紧随的 user 消息里有
+    /// 同 id 的 tool_result。注意：允许连续 user 消息——系统注入与摘要消息
+    /// 本来就产生 user,user（OpenAI/DeepSeek/Kimi wire 均接受）。
+    fn wire_invariants_assert(view: &[Message]) {
+        assert!(view.first().is_some_and(|m| m.role == Role::User));
+        // 每个 tool_use 在紧随的 user 消息里有同 id 的 tool_result
+        for (i, m) in view.iter().enumerate() {
+            for b in &m.content {
+                if let ContentBlock::ToolUse { id, .. } = b {
+                    let next = &view[i + 1];
+                    assert!(next.content.iter().any(|r| matches!(r,
+                        ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)),
+                        "tool_use {id} lost its result");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_compactions_passthrough() {
+        let h = sample_history();
+        assert_eq!(view(&h, &[]), h);
+    }
+
+    #[test]
+    fn shed_view_keeps_suffix_verbatim_and_sheds_prefix() {
+        let h = sample_history();
+        // keep_from=4：prefix = [user, tool_use, tool_result, assistant]，含可 shed 的块
+        let applied = vec![AppliedCompaction {
+            keep_from: 4,
+            strategy: CompactionStrategy::Shed,
+            summary: None,
+        }];
+        let v = view(&h, &applied);
+        assert_eq!(v.len(), h.len()); // 块不删，只换内容
+        wire_invariants_assert(&v);
+        // prefix 的 tool_result 被 shed（占位符保留工具名）
+        let ContentBlock::ToolResult { content, .. } = &v[2].content[0] else {
+            panic!()
+        };
+        assert!(content.contains("[shed: read"), "{content}");
+        // suffix 逐字节原样
+        assert_eq!(v[4..], h[4..]);
+    }
+
+    #[test]
+    fn summarize_view_replaces_prefix_with_single_user_message() {
+        let h = sample_history();
+        let v = view(&h, &[AppliedCompaction {
+            keep_from: 4,
+            strategy: CompactionStrategy::Summarize,
+            summary: Some("we read the file".into()),
+        }]);
+        assert_eq!(v.len(), h.len() - 4 + 1);
+        assert!(matches!(&v[0].role, Role::User));
+        let joined: String = v[0].content.iter().filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert!(joined.contains("[Earlier conversation summary]"), "{joined}");
+        assert!(joined.contains("we read the file"));
+        wire_invariants_assert(&v);
+    }
+
+    #[test]
+    fn replay_resolve_maps_entry_ids_to_message_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        let id0 = s.append(user("u0")).unwrap();
+        s.append(assistant("a0")).unwrap();
+        s.append_obs(ObsEvent {
+            run_id: 0, ts: 1,
+            body: ObsBody::Compacted {
+                up_to: id0,
+                strategy: CompactionStrategy::Shed,
+                shed_tool_results: 0,
+                turns_affected: 1,
+                summary: None,
+            },
+        }).unwrap();
+        s.append(user("u1")).unwrap();
+        s.append(assistant("a1")).unwrap();
+        let r = resolve(s.entries());
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].keep_from, 1); // ≤ up_to 的 Message 条数
+        assert_eq!(r[0].strategy, CompactionStrategy::Shed);
+    }
 
     #[test]
     fn sheds_tool_result_content_but_keeps_the_block() {
