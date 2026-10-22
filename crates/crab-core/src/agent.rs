@@ -3,11 +3,18 @@ use crate::session::{Session, SessionEntry};
 use crate::tool::ToolRegistry;
 use crate::types::{ContentBlock, EntryId, Message, Role, StopReason, ToolCallId};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AgentConfig {
     /// Prepended to the provider request as the system message. Empty = not injected.
     /// Not part of session history (it's per-run config, not conversation).
     pub system_prompt: String,
+    /// Context window size, when the profile declares one. Drives auto-compaction.
+    pub context_window: Option<u64>,
+    /// Auto-compact when the last prompt exceeds this fraction of the window.
+    /// 0.0 (the Default) disables auto-compaction; wired to 0.8 in production.
+    pub auto_compact_threshold: f64,
+    /// Compactions replayed from the session log at --continue.
+    pub compactions: Vec<crate::compact::AppliedCompaction>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +58,9 @@ pub struct Agent {
     session: Session,
     config: AgentConfig,
     history: Vec<Message>,
+    compactions: Vec<crate::compact::AppliedCompaction>,
+    /// Prompt tokens of the most recent LlmCall (auto-compaction trigger signal).
+    last_prompt: Option<u64>,
     abort: tokio_util::sync::CancellationToken,
     events_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     provider_calls: Vec<Vec<Message>>,
@@ -68,12 +78,15 @@ impl Agent {
         // Restore conversation history from a loaded session (--continue). A freshly
         // created session has no entries → empty history. (Fixes continue amnesia.)
         let history: Vec<Message> = session.messages().cloned().collect();
+        let compactions = config.compactions.clone();
         Self {
             provider,
             tools,
             session,
             config,
             history,
+            compactions,
+            last_prompt: None,
             abort: tokio_util::sync::CancellationToken::new(),
             events_tx,
             provider_calls: Vec::new(),
@@ -254,17 +267,20 @@ impl Agent {
             // we already have. Tool results from prior turns are already recorded.
             let tool_schemas = self.tools.schemas();
             // Inject system prompt as the first message for THIS call only (not history).
+            // The history goes through the compaction view: full fidelity stays in
+            // the log; the provider sees the compressed view.
+            let view_msgs = crate::compact::view(&self.history, &self.compactions);
             let request_msgs: Vec<Message> = if self.config.system_prompt.is_empty() {
-                self.history.clone()
+                view_msgs.clone()
             } else {
-                let mut v = Vec::with_capacity(self.history.len() + 1);
+                let mut v = Vec::with_capacity(view_msgs.len() + 1);
                 v.push(Message {
                     role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: self.config.system_prompt.clone(),
                     }],
                 });
-                v.extend(self.history.clone());
+                v.extend(view_msgs.clone());
                 v
             };
             // Record what we actually send (includes the injected system message).
@@ -278,6 +294,9 @@ impl Agent {
                 }
             };
             *llm_calls += 1;
+            if let Some(u) = t.usage {
+                self.last_prompt = Some(u.prompt as u64);
+            }
             self.obs(
                 run_id,
                 crate::obs::ObsBody::LlmCall {
@@ -495,6 +514,40 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn summarize_compaction_shrinks_the_request_view_not_the_history() {
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::TextDelta("ok".into()),
+            StreamEvent::StreamEnd { reason: StopReason::EndTurn },
+        ]]);
+        let tools = ToolRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut config = AgentConfig::default();
+        config.compactions = vec![crate::compact::AppliedCompaction {
+            keep_from: 2,
+            strategy: crate::obs::CompactionStrategy::Summarize,
+            summary: Some("earlier we chose X".into()),
+        }];
+        let mut agent = Agent::new(Box::new(provider), tools, session, config);
+        // 预置 3 对历史（直接推入，绕过 run）
+        for i in 0..3 {
+            agent.history.push(crate::types::Message { role: crate::types::Role::User,
+                content: vec![crate::types::ContentBlock::Text { text: format!("u{i}") }] });
+            agent.history.push(crate::types::Message { role: crate::types::Role::Assistant,
+                content: vec![crate::types::ContentBlock::Text { text: format!("a{i}") }] });
+        }
+        agent.run("go".into()).await.unwrap();
+        let calls = agent.provider_calls();
+        let req = calls.last().unwrap();
+        // history 保持全量（8 条：3 对 + 本轮 user + assistant 回复）
+        assert_eq!(agent.history().len(), 8);
+        // 请求在回复前构造：视图 = 1 条 summary + 5 条后缀 = 6 条；prefix 原文不在请求里
+        assert_eq!(req.len(), 6, "{req:?}");
+        assert!(!req.iter().any(|m| m.content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text == "u0"))));
+        assert!(req[0].content.iter().any(|b| matches!(b, crate::types::ContentBlock::Text { text } if text.contains("[Earlier conversation summary]"))));
     }
 
     #[tokio::test]
@@ -898,6 +951,7 @@ mod system_prompt_tests {
             session,
             AgentConfig {
                 system_prompt: "BASE RULES".into(),
+                ..Default::default()
             },
         );
         agent.run("hi".into()).await.unwrap();
@@ -925,6 +979,7 @@ mod system_prompt_tests {
             session,
             AgentConfig {
                 system_prompt: String::new(),
+                ..Default::default()
             },
         );
         agent.run("hi".into()).await.unwrap();
