@@ -230,7 +230,11 @@ pub fn resolve_provider(
                 base_url: String::new(),
                 model: "mock".into(),
                 api_key: String::new(),
-                context_window: None,
+                // Mock has no profile to carry a window, but the env override
+                // still applies (debugging auto-compaction with --provider mock).
+                context_window: std::env::var("CRAB_CONTEXT_WINDOW")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
                 provider_name: "mock".into(),
             },
         )),

@@ -1,6 +1,6 @@
 # Compaction 实施计划（混合式：确定性瘦身 + 按需摘要）
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** `--continue` 恢复和长时间运行时，通过"确定性瘦身 + 按需 LLM 摘要"把请求视图压回预算内，日志保持 append-only 唯一事实源。
 
@@ -43,7 +43,7 @@
 - Modify: `crates/crab-core/src/obs.rs`（`ObsBody` 枚举 + 新类型）
 - Test: `crates/crab-core/src/obs.rs` tests 模块
 
-- [ ] **Step 1: 写失败测试**（obs.rs 的 `mod tests` 内追加）
+- [x] **Step 1: 写失败测试**（obs.rs 的 `mod tests` 内追加）
 
 ```rust
     #[test]
@@ -68,12 +68,12 @@
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core obs::tests::compacted_event_roundtrips`
 Expected: FAIL（`CompactionStrategy` 未定义）
 
-- [ ] **Step 3: 实现**（obs.rs，`ObsBody` 枚举前加类型、枚举中加变体）
+- [x] **Step 3: 实现**（obs.rs，`ObsBody` 枚举前加类型、枚举中加变体）
 
 ```rust
 /// How a compaction condensed the prefix (spec §2).
@@ -103,12 +103,12 @@ pub enum CompactionStrategy {
     },
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core obs`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Commit** `feat(core): Compacted obs event — the replayable compaction record`
+- [x] **Step 5: Commit** `feat(core): Compacted obs event — the replayable compaction record`
 
 ---
 
@@ -117,7 +117,7 @@ Expected: 全部 PASS
 **Files:**
 - Modify: `crates/crab-core/src/meter.rs`
 
-- [ ] **Step 1: 写失败测试**（meter.rs tests 追加）
+- [x] **Step 1: 写失败测试**（meter.rs tests 追加）
 
 ```rust
     #[test]
@@ -136,12 +136,12 @@ Expected: 全部 PASS
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core meter`
 Expected: FAIL（`prompt_sizes` 未定义）
 
-- [ ] **Step 3: 实现**（meter.rs，紧跟 `context_used` 之后）
+- [x] **Step 3: 实现**（meter.rs，紧跟 `context_used` 之后）
 
 ```rust
 /// Prompt-token count of every LlmCall that carried usage, in log order.
@@ -167,12 +167,12 @@ pub fn prompt_sizes(entries: &[SessionEntry]) -> Vec<u64> {
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core meter`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Commit** `feat(core): meter::prompt_sizes — per-call prompt sequence for compaction planning`
+- [x] **Step 5: Commit** `feat(core): meter::prompt_sizes — per-call prompt sequence for compaction planning`
 
 ---
 
@@ -189,7 +189,7 @@ Expected: 全部 PASS
 - pairs ≤ 2 → `keep_from = 0`（无意义不压）。
 - `need_summary`：瘦身后的 prefix 估计仍 > target。估计法：prefix 瘦身变换后的字节数 × 全局 tokens/byte 比率 `r = sizes.last() / history 总字节数`（下限 r=0 时不摘要——分母为 0 说明没内容可压）。这是 Q16 允许的"事前决策估算"，仅供决策不展示。
 
-- [ ] **Step 1: 写失败测试**（compact.rs tests）
+- [x] **Step 1: 写失败测试**（compact.rs tests）
 
 ```rust
 #[cfg(test)]
@@ -293,12 +293,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core compact`
 Expected: FAIL（模块不存在）
 
-- [ ] **Step 3: 实现**（compact.rs 首部；lib.rs 加 `pub mod compact;`，插在 `pub mod config;` 后）
+- [x] **Step 3: 实现**（compact.rs 首部；lib.rs 加 `pub mod compact;`，插在 `pub mod config;` 后）
 
 ```rust
 //! Compaction: 确定性瘦身 + 按需摘要（spec 2026-10-21）。纯函数模块——
@@ -395,12 +395,12 @@ pub fn plan(history: &[Message], sizes: &[u64], budget: &Budget) -> Plan {
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core compact`
 Expected: 全部 PASS（若 `keeps_more_pairs_when_window_allows` 因 off-by-one 失败：m 上限取 `pairs`，`acc` 初值为末两 pair，逐对向上扩，核对边界后修实现或测试期望）
 
-- [ ] **Step 5: Commit** `feat(core): compact::plan — deterministic watermark under budget`
+- [x] **Step 5: Commit** `feat(core): compact::plan — deterministic watermark under budget`
 
 ---
 
@@ -411,7 +411,7 @@ Expected: 全部 PASS（若 `keeps_more_pairs_when_window_allows` 因 off-by-one
 
 **规则（spec §5）**：`ToolResult` 正文 → `[shed: {tool_name} → {n} bytes; re-run the tool if needed]`（tool_name 从 prefix 内配对 ToolUse 的 id→name 表查，查不到用 `"tool result"`）；`Text` 块 >2048 chars → 前 200 chars + `…({n} chars total, shed)`；其余原样。
 
-- [ ] **Step 1: 写失败测试**（compact.rs tests 追加）
+- [x] **Step 1: 写失败测试**（compact.rs tests 追加）
 
 ```rust
     use crate::types::ToolCallId;
@@ -475,12 +475,12 @@ Expected: 全部 PASS（若 `keeps_more_pairs_when_window_allows` 因 off-by-one
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core compact::tests::sheds`
 Expected: FAIL（`shed_message` 未定义）
 
-- [ ] **Step 3: 实现**（compact.rs）
+- [x] **Step 3: 实现**（compact.rs）
 
 ```rust
 use std::collections::HashMap;
@@ -517,12 +517,12 @@ pub fn shed_message(m: &Message, tool_names: &HashMap<ToolCallId, String>) -> Me
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core compact`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Commit** `feat(core): shed_message — deterministic tool-result shedding`
+- [x] **Step 5: Commit** `feat(core): shed_message — deterministic tool-result shedding`
 
 ---
 
@@ -533,7 +533,7 @@ Expected: 全部 PASS
 
 **语义**：`view` 只认**最后一条** `AppliedCompaction`（水位线单调递增，last-wins 即全量 fold）；`keep_from` 必须偶数（user 边界），`debug_assert`。Summarize：prefix → 一条 user 消息（`[Earlier conversation summary]` + summary）。`resolve` 把日志里的 `Compacted{up_to: EntryId}` 映射为 `AppliedCompaction{keep_from: 消息序号}`（≤up_to 的 Message 条数）。
 
-- [ ] **Step 1: 写失败测试**（compact.rs tests 追加）
+- [x] **Step 1: 写失败测试**（compact.rs tests 追加）
 
 ```rust
     use crate::obs::CompactionStrategy;
@@ -638,12 +638,12 @@ Expected: 全部 PASS
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core compact::tests`
 Expected: FAIL（`view`/`resolve` 未定义）
 
-- [ ] **Step 3: 实现**（compact.rs）
+- [x] **Step 3: 实现**（compact.rs）
 
 ```rust
 use crate::session::SessionEntry;
@@ -719,12 +719,12 @@ pub fn resolve(entries: &[SessionEntry]) -> Vec<AppliedCompaction> {
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core compact`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Commit** `feat(core): compact::view + resolve — request view and log replay`
+- [x] **Step 5: Commit** `feat(core): compact::view + resolve — request view and log replay`
 
 ---
 
@@ -733,7 +733,7 @@ Expected: 全部 PASS
 **Files:**
 - Modify: `crates/crab-core/src/agent.rs`（AgentConfig、Agent 字段、Agent::new、request_msgs 构造）
 
-- [ ] **Step 1: 写失败测试**（agent.rs tests 追加）
+- [x] **Step 1: 写失败测试**（agent.rs tests 追加）
 
 ```rust
     #[tokio::test]
@@ -771,12 +771,12 @@ Expected: 全部 PASS
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core compactions_shrink`
 Expected: FAIL（`AgentConfig.compactions` 不存在）
 
-- [ ] **Step 3: 实现**（agent.rs）
+- [x] **Step 3: 实现**（agent.rs）
 
 `AgentConfig` 扩字段（保持 `Default` 安全：threshold 0.0 = 关闭，Vec/Option 空）：
 
@@ -839,12 +839,12 @@ pub struct AgentConfig {
             }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core`
 Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
 
-- [ ] **Step 5: Commit** `feat(core): agent request view through compact::view`
+- [x] **Step 5: Commit** `feat(core): agent request view through compact::view`
 
 ---
 
@@ -853,7 +853,7 @@ Expected: 全部 PASS（既有 173+ 测试不得破——视图默认直通）
 **Files:**
 - Modify: `crates/crab-core/src/agent.rs`（`run_compaction`、`compact_now`、`compaction_due`、obs 落盘、事件）
 
-- [ ] **Step 1: 写失败测试**（agent.rs tests 追加）
+- [x] **Step 1: 写失败测试**（agent.rs tests 追加）
 
 ```rust
     use crate::obs::CompactionStrategy;
@@ -992,12 +992,12 @@ pub struct CompactReport {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core compact_now_sheds`
 Expected: FAIL（`compact_now` 未定义）
 
-- [ ] **Step 3: 实现**（agent.rs）
+- [x] **Step 3: 实现**（agent.rs）
 
 ```rust
     /// 手动 /compact 入口：无视阈值，立即执行一次压缩（spec §4）。
@@ -1168,12 +1168,12 @@ Under 800 words.\n\n[Conversation to summarize]";
 
 （summary 调用本身就是一次 provider.complete——MockProvider 会 pop 一个脚本；自动触发的既有测试若因多 pop 一次脚本而脚本耗尽，MockProvider `unwrap_or_default()` 返回空脚本不 panic，但断言 usage 的测试需检查——`auto_compaction_fires_when_prompt_crosses_threshold` 已按此设计。）
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Commit** `feat(core): run_compaction engine — auto trigger, manual /compact path, summary fallback`
+- [x] **Step 5: Commit** `feat(core): run_compaction engine — auto trigger, manual /compact path, summary fallback`
 
 ---
 
@@ -1182,7 +1182,7 @@ Expected: 全部 PASS
 **Files:**
 - Modify: `crates/crab-core/src/config.rs`（Config 字段 + 解析方法）
 
-- [ ] **Step 1: 写失败测试**（config.rs tests 追加）
+- [x] **Step 1: 写失败测试**（config.rs tests 追加）
 
 ```rust
     #[test]
@@ -1198,12 +1198,12 @@ Expected: 全部 PASS
 
 （env 覆盖测试不写——`CRAB_AUTO_COMPACT_THRESHOLD` 走 `std::env::set_var` 会并行测试打架；解析函数拆成 `fn resolve_threshold(file: Option<f64>, env: Option<String>) -> f64` 纯函数单独测。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-core auto_compact`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**（config.rs）
+- [x] **Step 3: 实现**（config.rs）
 
 ```rust
 pub struct Config {
@@ -1238,12 +1238,12 @@ fn resolve_threshold(file: Option<f64>, env: Option<String>) -> f64 {
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-core config`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Commit** `feat(core): auto_compact_threshold config with env override`
+- [x] **Step 5: Commit** `feat(core): auto_compact_threshold config with env override`
 
 ---
 
@@ -1254,7 +1254,7 @@ Expected: 全部 PASS
 - Modify: `crates/crab-cli/src/tui/state.rs`（SlashCommand::Compact + parse）
 - Modify: `crates/crab-cli/src/tui/mod.rs`（UiCommand::Compact 分发 + Compacted 事件通知）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 state.rs tests 追加：
 
@@ -1262,12 +1262,12 @@ state.rs tests 追加：
         assert_eq!(parse_slash("/compact"), Some(SlashCommand::Compact));
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p crab-cli parse_slash`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 state.rs `SlashCommand` 加 `Compact` 变体；`parse_slash` match 加 `"compact" => SlashCommand::Compact`。app.rs `build_agent` 的 `AgentConfig` 构造（现有只有 `system_prompt`）扩为：
 
@@ -1333,12 +1333,12 @@ mod.rs：`UiCommand` 加 `Compact` 变体；select loop 加 arm（在 `ToggleYol
             }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p crab-cli`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Commit** `feat(cli): /compact command and auto-compaction wiring`
+- [x] **Step 5: Commit** `feat(cli): /compact command and auto-compaction wiring`
 
 ---
 
@@ -1348,7 +1348,7 @@ Expected: 全部 PASS
 - Modify: `README.md`（config 表 + slash 表 + Sessions 节一段）
 - Modify: `STORY.md`（可选：Status 里把 compaction 移出 future work——留到下个 release 统一做，**本任务不动**）
 
-- [ ] **Step 1: README** — config.toml 形状块加一行：
+- [x] **Step 1: README** — config.toml 形状块加一行：
 
 ```toml
 auto_compact_threshold = 0.8  # auto-compact above 80% of the context window; 0 disables
@@ -1367,12 +1367,12 @@ log is never rewritten — compaction is recorded as an event and the view is
 rebuilt by replay, so `--continue` sees exactly what the model saw.
 ```
 
-- [ ] **Step 2: 全套件 + clippy**
+- [x] **Step 2: 全套件 + clippy**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings`
 Expected: 全绿、零警告
 
-- [ ] **Step 3: e2e 冒烟**
+- [x] **Step 3: e2e 冒烟**
 
 ```sh
 cd "$(mktemp -d)"
@@ -1390,7 +1390,7 @@ grep -c compacted .crab/sessions/fake.jsonl   # 期望 ≥1
 
 期望：自动压缩触发（110k > 0.8×128k），日志新增 compacted 行，--print 正常返回。
 
-- [ ] **Step 4: Commit** `docs(cli): compaction — config, slash command, session-log story`
+- [x] **Step 4: Commit** `docs(cli): compaction — config, slash command, session-log story`
 
 ---
 

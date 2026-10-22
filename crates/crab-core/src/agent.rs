@@ -104,6 +104,9 @@ impl Agent {
         // Restore conversation history from a loaded session (--continue). A freshly
         // created session has no entries → empty history. (Fixes continue amnesia.)
         let history: Vec<Message> = session.messages().cloned().collect();
+        // Seed the trigger signal from the log: a resumed session may already
+        // be over threshold before its first call (--continue compacts up front).
+        let last_prompt = crate::meter::context_used(session.entries());
         let compactions = config.compactions.clone();
         Self {
             provider,
@@ -112,7 +115,7 @@ impl Agent {
             config,
             history,
             compactions,
-            last_prompt: None,
+            last_prompt,
             abort: tokio_util::sync::CancellationToken::new(),
             events_tx,
             provider_calls: Vec::new(),
@@ -854,6 +857,81 @@ pub(crate) mod tests {
         let report = agent.compact_now().await;
         assert_eq!(report.strategy, CompactionStrategy::Shed);
         assert!(report.summary_failed); // 降级可见
+    }
+
+    #[tokio::test]
+    async fn resumed_session_over_threshold_compacts_before_first_request() {
+        // --continue 场景：日志里最后一次调用已超阈值 → 本轮 loop 顶即压缩
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = crate::session::Session::create(dir.path()).unwrap();
+        let long_first_question = format!("question 0 {}", "detail".repeat(800)); // ~3200 chars, shed-able
+        session
+            .append(crate::types::Message {
+                role: crate::types::Role::User,
+                content: vec![crate::types::ContentBlock::Text {
+                    text: long_first_question.clone(),
+                }],
+            })
+            .unwrap();
+        for i in 1..3 {
+            session
+                .append(crate::types::Message {
+                    role: crate::types::Role::User,
+                    content: vec![crate::types::ContentBlock::Text {
+                        text: format!("question {i}"),
+                    }],
+                })
+                .unwrap();
+            session
+                .append(crate::types::Message {
+                    role: crate::types::Role::Assistant,
+                    content: vec![crate::types::ContentBlock::Text {
+                        text: format!("answer {i}"),
+                    }],
+                })
+                .unwrap();
+        }
+        session
+            .append_obs(crate::obs::ObsEvent {
+                run_id: 0,
+                ts: 1,
+                body: crate::obs::ObsBody::LlmCall {
+                    provider: "x".into(),
+                    model: "x".into(),
+                    duration_ms: 1,
+                    usage: Some(crate::obs::LlmUsage {
+                        prompt: 110_000,
+                        ..Default::default()
+                    }),
+                    outcome: crate::obs::ObsOutcome::Ok,
+                },
+            })
+            .unwrap();
+        let loaded = crate::session::Session::load(session.path()).unwrap();
+        let provider = MockProvider::new(vec![usage_turn(50_000)]);
+        let config = AgentConfig {
+            context_window: Some(128_000),
+            auto_compact_threshold: 0.8,
+            ..Default::default()
+        };
+        let tools = ToolRegistry::new();
+        let mut agent = Agent::new(Box::new(provider), tools, loaded, config);
+        agent.run("continue please".into()).await.unwrap();
+        let bodies = obs_bodies(&agent);
+        assert!(
+            bodies
+                .iter()
+                .any(|(_, b)| matches!(b, crate::obs::ObsBody::Compacted { .. })),
+            "expected a Compacted event on resume, got {bodies:?}"
+        );
+        // 压缩后的请求视图：prefix 的长文本被截断为 shed 占位（块不删，内容换）
+        let req = agent.provider_calls().last().unwrap();
+        assert!(!req.iter().any(|m| m.content.iter().any(|b| matches!(
+            b, crate::types::ContentBlock::Text { text } if text == &long_first_question
+        ))));
+        assert!(req.iter().flat_map(|m| &m.content).any(|b| matches!(
+            b, crate::types::ContentBlock::Text { text } if text.contains("chars total, shed")
+        )));
     }
 
     #[tokio::test]

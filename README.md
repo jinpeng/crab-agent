@@ -61,6 +61,7 @@ The prompt is `crab> `. Slash commands:
 | `/models` | open a picker to choose a profile with ↑↓/Enter |
 | `/skill:<name> [args]` | inject a discovered skill's instructions as a user message |
 | `/skills` | open a picker listing discovered skills; fills `/skill:<name>` into the input |
+| `/compact` | compact the conversation now (shed old tool results; summarize if needed) |
 
 While the agent is running, **Ctrl-C aborts the current run** (it does not exit
 `crab` — the text and tool results produced so far are kept on disk). A Ctrl-C
@@ -86,6 +87,8 @@ context_window = 128000
 [providers.local]
 base_url = "http://localhost:8080/v1"
 model = "qwen"
+
+auto_compact_threshold = 0.8  # auto-compact above 80% of the context window; 0 disables
 ```
 
 Provider fields:
@@ -275,6 +278,18 @@ best-effort — telemetry never enters the model context). Costing uses a built-
 per-model pricing table with versioned rate history and peak/valley windows,
 overlaid by `~/.crab/pricing.toml` if you want your own rates. Models without a
 price show `-` rather than a fake `$0`.
+
+### Compaction
+
+When the last request's prompt crosses `auto_compact_threshold` (default 0.8)
+of the context window — or when you type `/compact` — crab condenses the
+conversation before the next request: old tool results become short
+placeholders (the model can re-run the tool to see them again), and if that
+isn't enough, older turns are replaced by an LLM-written summary. The session
+log is **never rewritten**: compaction is recorded as an event, and the model's
+view is rebuilt by replaying it, so `--continue` sees exactly what the model
+saw. Set `auto_compact_threshold = 0` in `~/.crab/config.toml` to disable the
+automatic trigger.
 
 ## License
 
