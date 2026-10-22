@@ -492,7 +492,7 @@ mod tests {
         );
         let rows = render_frame(&mut s, 80, 12);
         let status_row = &rows[rows.len() - 1];
-        assert!(status_row.contains("CH66%/128.0k"), "{status_row:?}");
+        assert!(status_row.contains("CH66% 85.0k/128.0k"), "{status_row:?}");
     }
 
     /// `--continue` also seeds the cumulative counters: the first frame shows

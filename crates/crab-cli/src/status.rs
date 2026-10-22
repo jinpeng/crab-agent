@@ -150,13 +150,13 @@ impl StatusLine {
         truncate_to_width(&format!(" {left} "), width)
     }
 
-    /// `CH<pct>%/<window>` (pi's `20.5%/1.0M` convention), or None when usage
-    /// or the window is unknown.
+    /// `CH<pct>% <used>/<window>` (e.g. `CH12% 15.4k/128.0k`), or None when
+    /// usage or the window is unknown.
     fn ch_segment(&self) -> Option<String> {
         let used = self.context_used?;
         let window = self.context_window.filter(|w| *w > 0)?;
         let pct = (used.saturating_mul(100) + window / 2) / window;
-        Some(format!("CH{pct}%/{}", kfmt(window)))
+        Some(format!("CH{pct}% {}/{}", kfmt(used), kfmt(window)))
     }
 
     /// The working directory, with a leading `$HOME` shortened to `~`.
@@ -315,7 +315,7 @@ mod tests {
         let row = full().format_status_row(80);
         assert_eq!(visible_width(&row), 80, "got {row:?}");
         assert!(row.contains("↑45.6k ↓12.3k"), "got {row:?}");
-        assert!(row.contains("CH7%/128.0k"), "got {row:?}"); // 8500/128000 ~ 6.6% -> 7%
+        assert!(row.contains("CH7% 8.5k/128.0k"), "got {row:?}"); // 8500/128000 ~ 6.6% -> 7%
         assert!(row.contains("streaming"), "got {row:?}");
         assert!(row.trim_end().ends_with("deepseek/deepseek-chat"), "got {row:?}");
     }
@@ -327,7 +327,7 @@ mod tests {
         assert!(row.contains("↑45.6k ↓12.3k"), "got {row:?}");
         assert!(row.contains("R910"), "got {row:?}");
         assert!(!row.contains('W'), "cache_write is 0 in the fixture: {row:?}");
-        assert!(row.contains("CH7%/128.0k"), "got {row:?}");
+        assert!(row.contains("CH7% 8.5k/128.0k"), "got {row:?}");
     }
 
     #[test]
