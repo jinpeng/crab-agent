@@ -460,7 +460,12 @@ mod tests {
             Some(128_000),
             None,
         );
-        s.status.add_usage(8500, 100); // makes the CH segment appear
+        s.status.add_usage(crab_core::obs::LlmUsage {
+            prompt: 8500,
+            completion: 100,
+            cache_read: 0,
+            cache_write: 0,
+        }); // makes the CH segment appear
         let rows = render_frame(&mut s, 80, 12);
         let cwd_row = &rows[rows.len() - 2];
         let status_row = &rows[rows.len() - 1];

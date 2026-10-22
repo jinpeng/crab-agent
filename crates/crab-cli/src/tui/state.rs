@@ -576,9 +576,15 @@ impl TuiState {
             Usage {
                 prompt_tokens,
                 completion_tokens,
-                ..
+                cache_read_tokens,
+                cache_write_tokens,
             } => {
-                self.status.add_usage(prompt_tokens, completion_tokens);
+                self.status.add_usage(crab_core::obs::LlmUsage {
+                    prompt: prompt_tokens,
+                    completion: completion_tokens,
+                    cache_read: cache_read_tokens,
+                    cache_write: cache_write_tokens,
+                });
             }
             Compacted {
                 strategy,

@@ -40,6 +40,8 @@ pub struct StatusLine {
     state: RunState,
     tokens_in: u64,
     tokens_out: u64,
+    cache_read: u64,
+    cache_write: u64,
     context_used: Option<u64>,
     context_window: Option<u64>,
     cwd: PathBuf,
@@ -57,6 +59,8 @@ impl StatusLine {
             state: RunState::Idle,
             tokens_in: 0,
             tokens_out: 0,
+            cache_read: 0,
+            cache_write: 0,
             context_used: None,
             context_window: None,
             cwd,
@@ -74,13 +78,16 @@ impl StatusLine {
         self.provider_model = provider_model;
     }
 
-    /// Accumulate a response's token usage and refresh the context estimate.
-    pub fn add_usage(&mut self, prompt_tokens: u32, completion_tokens: u32) {
-        self.tokens_in += prompt_tokens as u64;
-        self.tokens_out += completion_tokens as u64;
+    /// Accumulate a response's four-way usage and refresh the context estimate.
+    /// Cache read/write follow pi's status-line convention: `R`/`W` segments.
+    pub fn add_usage(&mut self, u: crab_core::obs::LlmUsage) {
+        self.tokens_in += u.prompt as u64;
+        self.tokens_out += u.completion as u64;
+        self.cache_read += u.cache_read as u64;
+        self.cache_write += u.cache_write as u64;
         // The last request's prompt size is the closest proxy for how much of
         // the context window is occupied right now.
-        self.context_used = Some(prompt_tokens as u64);
+        self.context_used = Some(u.prompt as u64);
     }
 
     /// Replace the cached git branch (refreshed by the TUI's async task).
@@ -104,11 +111,18 @@ impl StatusLine {
         truncate_to_width(&format!(" {label} "), width)
     }
 
-    /// Row 2: left `↑out ↓in CH<pct>% <state>` and right `(provider) model`,
-    /// right-aligned to `width`. When too narrow the model label is dropped
-    /// and only the left part is kept (clipped).
+    /// Row 2: left `↑in ↓out [R<cacheRead> [W<cacheWrite>]] CH<pct>% <state>`
+    /// (pi's arrow convention: ↑ = input, ↓ = output; R/W only when non-zero)
+    /// and right `(provider) model`, right-aligned to `width`. When too narrow
+    /// the model label is dropped and only the left part is kept (clipped).
     pub fn format_status_row(&self, width: usize) -> String {
-        let mut left = format!("↑{} ↓{}", kfmt(self.tokens_out), kfmt(self.tokens_in));
+        let mut left = format!("↑{} ↓{}", kfmt(self.tokens_in), kfmt(self.tokens_out));
+        if self.cache_read > 0 {
+            left.push_str(&format!(" R{}", kfmt(self.cache_read)));
+        }
+        if self.cache_write > 0 {
+            left.push_str(&format!(" W{}", kfmt(self.cache_write)));
+        }
         if let Some(ch) = self.ch_segment() {
             left.push(' ');
             left.push_str(&ch);
@@ -207,6 +221,8 @@ mod tests {
             state: RunState::Streaming,
             tokens_in: 45_600,
             tokens_out: 12_300,
+            cache_read: 910,
+            cache_write: 0,
             context_used: Some(8500),
             context_window: Some(128_000),
             cwd: home().join("projects/crab"),
@@ -225,12 +241,24 @@ mod tests {
     }
 
     #[test]
-    fn add_usage_accumulates_and_context_takes_latest_prompt() {
+    fn add_usage_accumulates_four_way_and_context_takes_latest_prompt() {
         let mut s = StatusLine::new("m".into(), PathBuf::from("/"));
-        s.add_usage(100, 20);
-        s.add_usage(300, 40);
+        s.add_usage(crab_core::obs::LlmUsage {
+            prompt: 100,
+            completion: 20,
+            cache_read: 30,
+            cache_write: 5,
+        });
+        s.add_usage(crab_core::obs::LlmUsage {
+            prompt: 300,
+            completion: 40,
+            cache_read: 70,
+            cache_write: 5,
+        });
         assert_eq!(s.tokens_in, 400);
         assert_eq!(s.tokens_out, 60);
+        assert_eq!(s.cache_read, 100);
+        assert_eq!(s.cache_write, 10);
         assert_eq!(s.context_used, Some(300), "context tracks the latest prompt size");
     }
 
@@ -254,17 +282,35 @@ mod tests {
     fn status_row_is_exactly_width_with_model_right_aligned() {
         let row = full().format_status_row(80);
         assert_eq!(visible_width(&row), 80, "got {row:?}");
-        assert!(row.contains("↑12.3k ↓45.6k"), "got {row:?}");
+        assert!(row.contains("↑45.6k ↓12.3k"), "got {row:?}");
         assert!(row.contains("CH7%/128.0k"), "got {row:?}"); // 8500/128000 ~ 6.6% -> 7%
         assert!(row.contains("streaming"), "got {row:?}");
         assert!(row.trim_end().ends_with("deepseek/deepseek-chat"), "got {row:?}");
     }
 
     #[test]
+    fn status_row_uses_pi_arrow_convention_with_cache_segments() {
+        let row = full().format_status_row(80);
+        // pi: ↑=input ↓=output；R=cache-read，W 只在非零时出现。
+        assert!(row.contains("↑45.6k ↓12.3k"), "got {row:?}");
+        assert!(row.contains("R910"), "got {row:?}");
+        assert!(!row.contains('W'), "cache_write is 0 in the fixture: {row:?}");
+        assert!(row.contains("CH7%/128.0k"), "got {row:?}");
+    }
+
+    #[test]
+    fn status_row_shows_w_when_cache_write_nonzero() {
+        let mut s = full();
+        s.cache_write = 2_500;
+        let row = s.format_status_row(80);
+        assert!(row.contains("R910 W2.5k"), "got {row:?}");
+    }
+
+    #[test]
     fn status_row_drops_model_when_narrow() {
         let row = full().format_status_row(24);
         assert!(visible_width(&row) <= 24);
-        assert!(row.contains("↑12.3k"), "numbers survive longest: {row:?}");
+        assert!(row.contains("↑45.6k"), "numbers survive longest: {row:?}");
         assert!(!row.contains("deepseek"), "got {row:?}");
     }
 
