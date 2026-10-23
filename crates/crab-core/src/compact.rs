@@ -162,7 +162,7 @@ pub struct AppliedCompaction {
     pub summary: Option<String>,
 }
 
-fn text_bytes(msgs: &[Message]) -> usize {
+pub(crate) fn text_bytes(msgs: &[Message]) -> usize {
     msgs.iter()
         .flat_map(|m| &m.content)
         .map(|b| match b {
@@ -173,6 +173,26 @@ fn text_bytes(msgs: &[Message]) -> usize {
             crate::types::ContentBlock::ToolResult { content, .. } => content.len(),
         })
         .sum()
+}
+
+/// Estimate the prompt-token occupancy of a compacted `view`, scaled from
+/// the last provider-reported prompt size (`last_prompt`, which covered
+/// `history`). Provider usage is the only exact anchor (Q16); the byte
+/// ratio is an estimate until the next call's real usage corrects it —
+/// used to rebase the status line and the auto-compact trigger right after
+/// a compaction instead of waiting for the next turn.
+pub fn estimate_view_tokens(
+    history: &[Message],
+    view: &[Message],
+    last_prompt: u64,
+) -> Option<u64> {
+    let total = text_bytes(history) as u64;
+    if total == 0 {
+        return None;
+    }
+    // 压缩只会缩小上下文：占位符对小 tool result 可能反而更长，
+    // 估计必须夹在 last_prompt 以内（占用不可能因压缩上升）。
+    Some((last_prompt.saturating_mul(text_bytes(view) as u64) / total).min(last_prompt))
 }
 
 pub fn plan(history: &[Message], sizes: &[u64], budget: &Budget) -> Plan {
@@ -319,6 +339,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn estimate_view_tokens_scales_by_byte_ratio() {
+        // 内容减半 → 占用估计减半（锚是 provider 报的 prompt tokens）。
+        let big = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "x".repeat(1000),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "y".repeat(1000),
+                }],
+            },
+        ];
+        let small = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "x".repeat(250),
+            }],
+        }];
+        assert_eq!(estimate_view_tokens(&big, &small, 800), Some(100));
+        assert_eq!(estimate_view_tokens(&big, &big, 800), Some(800));
+        // 空历史无比率可算。
+        assert_eq!(estimate_view_tokens(&[], &small, 800), None);
     }
 
     #[test]

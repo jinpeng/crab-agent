@@ -114,6 +114,19 @@ impl StatusLine {
         self.branch = branch;
     }
 
+    /// Replace only the occupancy estimate (e.g. right after compaction),
+    /// keeping the window. The next `add_usage` overwrites it with the
+    /// provider-reported prompt size.
+    pub fn set_context_used(&mut self, used: Option<u64>) {
+        self.context_used = used;
+    }
+
+    /// Current occupancy estimate (test accessor).
+    #[cfg(test)]
+    pub fn context_used(&self) -> Option<u64> {
+        self.context_used
+    }
+
     /// Replace the context budget. Pass `None` for either value when it is
     /// unknown; without a window the segment shows the absolute count only.
     pub fn set_context(&mut self, used: Option<u64>, window: Option<u64>) {

@@ -20,6 +20,9 @@ pub struct CompactReport {
     pub turns_affected: u32,
     /// 计划摘要但调用失败（或返回空文本），退回 shed-only（spec §6）。
     pub summary_failed: bool,
+    /// 压缩后请求视图的占用估计（bytes 比率折算，Q16 估算）；
+    /// 未压缩（keep_from == 0）或无从锚定时为 None —— 调用方不得改动状态。
+    pub context_after: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -71,10 +74,14 @@ pub enum AgentEvent {
     },
     /// Compaction condensed the request view (auto or /compact). The TUI
     /// surfaces it as a notice; the durable record is the Compacted obs event.
+    /// `context_after` is the estimated occupancy of the compacted view —
+    /// rebase the status line and the auto-compact trigger immediately
+    /// instead of waiting for the next turn's real usage.
     Compacted {
         strategy: crate::obs::CompactionStrategy,
         shed_tool_results: u32,
         turns_affected: u32,
+        context_after: Option<u64>,
     },
 }
 
@@ -106,8 +113,27 @@ impl Agent {
         let history: Vec<Message> = session.messages().cloned().collect();
         // Seed the trigger signal from the log: a resumed session may already
         // be over threshold before its first call (--continue compacts up front).
-        let last_prompt = crate::meter::context_used(session.entries());
+        let mut last_prompt = crate::meter::context_used(session.entries());
         let compactions = config.compactions.clone();
+        // 日志尾巴是 Compacted（压缩后没再对话就退出）：最后的 usage 是压缩
+        // 前的占用，直接当锚会高估 —— 按压缩后视图折算一次。
+        let tail_is_compacted = matches!(
+            session.entries().last(),
+            Some(SessionEntry::Obs {
+                event: crate::obs::ObsEvent {
+                    body: crate::obs::ObsBody::Compacted { .. },
+                    ..
+                },
+                ..
+            })
+        );
+        if tail_is_compacted && let Some(p) = last_prompt {
+            last_prompt = crate::compact::estimate_view_tokens(
+                &history,
+                &crate::compact::view(&history, &compactions),
+                p,
+            );
+        }
         Self {
             provider,
             tools,
@@ -176,6 +202,7 @@ impl Agent {
                 shed_tool_results: 0,
                 turns_affected: 0,
                 summary_failed: false,
+                context_after: None, // 未压缩：调用方不得改动状态
             };
         }
 
@@ -252,6 +279,7 @@ impl Agent {
                 shed_tool_results: 0,
                 turns_affected: 0,
                 summary_failed: false,
+                context_after: None, // 放弃本次压缩：状态不动
             };
         };
 
@@ -273,16 +301,30 @@ impl Agent {
             strategy,
             summary,
         });
+        // 重锚占用：状态栏与自动触发器都用 last_prompt，压缩后必须按
+        // 新视图估计，否则 /compact 后旧值会一直挂着（下次 usage 才纠正），
+        // 自动触发器更会立刻二次压缩。真实用量下一轮会覆盖估计。
+        let context_after = match self.last_prompt {
+            Some(p) => crate::compact::estimate_view_tokens(
+                &self.history,
+                &crate::compact::view(&self.history, &self.compactions),
+                p,
+            ),
+            None => None,
+        };
+        self.last_prompt = context_after;
         let report = CompactReport {
             strategy,
             shed_tool_results: shed_count,
             turns_affected,
             summary_failed,
+            context_after,
         };
         let _ = self.events_tx.send(AgentEvent::Compacted {
             strategy,
             shed_tool_results: shed_count,
             turns_affected,
+            context_after,
         });
         report
     }
@@ -805,6 +847,115 @@ pub(crate) mod tests {
             "expected a Compacted event, got {bodies:?}"
         );
         assert_eq!(agent.compactions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn manual_compact_rebases_last_prompt_and_report_carries_estimate() {
+        // 与 compact_now_sheds 同款脚本：真实 usage 序列（60k→80k→100k）。
+        let provider = MockProvider::new(vec![
+            tool_turn(),
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+        ]);
+        // 窗口 100k × 0.8 = 80k：100k 超限触发，但一轮 shed 足够治愈
+        // （保留 2 pair ≈ 40k）——正适合验证"压缩后不立即二次压缩"。
+        let config = AgentConfig {
+            context_window: Some(100_000),
+            auto_compact_threshold: 0.8,
+            ..Default::default()
+        };
+        let tools = ToolRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(provider), tools, session, config);
+        agent.run("start".into()).await.unwrap(); // tool_turn + 60k
+        agent.run("more".into()).await.unwrap(); // 80k
+        agent.run("again".into()).await.unwrap(); // 100k
+        assert!(agent.compaction_due(), "precondition: 100k > 0.8*100k");
+        // 让字节数与 token 成比例（真实对话的形态）——插在中间，使它们
+        // 落在被 shed 的 prefix 里；测试脚本的短消息会让字节比率估计失真。
+        for i in 0..2 {
+            agent.history.insert(
+                4,
+                crate::types::Message {
+                    role: crate::types::Role::User,
+                    content: vec![crate::types::ContentBlock::Text {
+                        text: format!("detail {i} ") + &"x".repeat(10_000),
+                    }],
+                },
+            );
+            agent.history.insert(
+                5,
+                crate::types::Message {
+                    role: crate::types::Role::Assistant,
+                    content: vec![crate::types::ContentBlock::Text {
+                        text: "y".repeat(10_000),
+                    }],
+                },
+            );
+        }
+
+        let report = agent.compact_now().await;
+        assert!(report.turns_affected > 0);
+        // 占用估计必须立刻下降：100k → 小得多的值，状态栏与触发器都靠它。
+        let after = report.context_after.expect("estimate after compact");
+        assert!(after < 100_000, "estimate must drop: {after}");
+        assert_eq!(agent.last_prompt, Some(after), "last_prompt rebased");
+        assert!(
+            !agent.compaction_due(),
+            "trigger must not fire again right after a manual compact"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_with_compacted_tail_estimates_context_from_the_view() {
+        // 压缩后没再对话就退出：日志尾巴是 Compacted，最后的 usage（100k）
+        // 是压缩前的占用。--continue 时必须按压缩后视图折算，否则触发器
+        // 会把已压缩的会话误判为超限。
+        let provider = MockProvider::new(vec![
+            tool_turn(),
+            usage_turn(60_000),
+            usage_turn(80_000),
+            usage_turn(100_000),
+        ]);
+        let config = AgentConfig {
+            context_window: Some(10_000),
+            auto_compact_threshold: 0.8,
+            ..Default::default()
+        };
+        let tools = ToolRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(Box::new(provider), tools, session, config);
+        agent.run("start".into()).await.unwrap();
+        agent.run("more".into()).await.unwrap();
+        agent.run("again".into()).await.unwrap();
+        agent.compact_now().await;
+        // 此刻 last_prompt 已是估计值 —— 直接断言 resume 行为：重载同一日志。
+        let path = agent.session.path().to_path_buf();
+        drop(agent);
+        let session2 = crate::session::Session::load(&path).unwrap();
+        let provider2 = MockProvider::new(vec![usage_turn(500)]);
+        let agent2 = Agent::new(
+            Box::new(provider2),
+            ToolRegistry::new(),
+            session2,
+            AgentConfig {
+                context_window: Some(100_000),
+                auto_compact_threshold: 0.8,
+                // --continue 路径：resolve 出压缩记录
+                compactions: crate::compact::resolve(
+                    crate::session::Session::load(&path).unwrap().entries(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !agent2.compaction_due(),
+            "resumed-after-compact must not be due: last_prompt={:?}",
+            agent2.last_prompt
+        );
     }
 
     #[tokio::test]

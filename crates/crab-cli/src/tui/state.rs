@@ -839,7 +839,11 @@ impl TuiState {
                 strategy,
                 shed_tool_results,
                 turns_affected,
+                context_after,
             } => {
+                // 压缩立刻反映在状态栏：占用估计按压缩后视图重锚
+                // （下次 usage 会用真实 prompt 覆盖）。
+                self.status.set_context_used(context_after);
                 let mut msg = format!(
                     "compacted {turns_affected} turns, shed {shed_tool_results} tool results"
                 );
@@ -1211,6 +1215,40 @@ mod tests {
         s.input.insert_str("o");
         s.sync_slash_hint();
         assert!(s.slash_hint.is_some());
+    }
+
+    #[test]
+    fn compacted_event_rebases_context_used() {
+        // /compact 后状态栏占比必须立刻反映压缩后视图，而不是等下次 usage。
+        let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        s.apply_agent_event(crab_core::agent::AgentEvent::Usage {
+            prompt_tokens: 100_000,
+            completion_tokens: 10,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        });
+        assert_eq!(s.status.context_used(), Some(100_000));
+        s.apply_agent_event(crab_core::agent::AgentEvent::Compacted {
+            strategy: crab_core::obs::CompactionStrategy::Shed,
+            shed_tool_results: 7,
+            turns_affected: 6,
+            context_after: Some(40_000),
+        });
+        assert_eq!(
+            s.status.context_used(),
+            Some(40_000),
+            "status line must drop right after compaction"
+        );
+        // 无从锚定（None）→ 显示未知而不是编造数字（与未定价模型显示 '-'
+        // 同一诚实原则）。事件只在真实压缩后发出，None 仅意味着没有
+        // usage 锚点——此刻状态栏本来就没有可展示的占用。
+        s.apply_agent_event(crab_core::agent::AgentEvent::Compacted {
+            strategy: crab_core::obs::CompactionStrategy::Shed,
+            shed_tool_results: 0,
+            turns_affected: 0,
+            context_after: None,
+        });
+        assert_eq!(s.status.context_used(), None);
     }
 
     #[test]
