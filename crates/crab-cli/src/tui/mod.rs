@@ -179,77 +179,63 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     });
 
     // Async command handler - runs agent runs and processes commands
-    loop {
+    'outer: loop {
         tokio::select! {
             // Receive commands from TUI
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::Submit(text) => {
-                        // Run the agent
-                        let abort = agent.abort_token();
-                        let run = agent.run(text);
-                        tokio::pin!(run);
-
-                        // Wait for completion or abort
-                        loop {
-                            tokio::select! {
-                                r = &mut run => {
-                                    if let Err(e) = r {
-                                        let _ = err_tx.send(UiEvent::Error(e.to_string()));
+                    UiCommand::Submit(first) => {
+                        // Run the agent. Commands arriving mid-run are queued,
+                        // not dropped — typing /model (or the next prompt)
+                        // while the agent works must still take effect once
+                        // the run finishes.
+                        let mut next: Option<String> = Some(first);
+                        while let Some(text) = next.take() {
+                            let abort = agent.abort_token();
+                            let mut pending: Vec<UiCommand> = Vec::new();
+                            {
+                                let run = agent.run(text);
+                                tokio::pin!(run);
+                                loop {
+                                    tokio::select! {
+                                        r = &mut run => {
+                                            if let Err(e) = r {
+                                                let _ = err_tx.send(UiEvent::Error(e.to_string()));
+                                            }
+                                            break;
+                                        }
+                                        Some(cmd) = cmd_rx.recv() => {
+                                            if matches!(cmd, UiCommand::Abort) {
+                                                abort.cancel();
+                                            } else {
+                                                pending.push(cmd);
+                                            }
+                                        }
+                                        else => break,
                                     }
-                                    break;
                                 }
-                                Some(cmd) = cmd_rx.recv() => {
-                                    if matches!(cmd, UiCommand::Abort) {
-                                        abort.cancel();
+                            } // run dropped here: the &mut agent borrow ends
+                            for cmd in pending {
+                                match cmd {
+                                    // A queued prompt runs next, in order.
+                                    UiCommand::Submit(text) => next = Some(text),
+                                    UiCommand::Quit => break 'outer,
+                                    other => {
+                                        handle_command(
+                                            other, &mut agent, &gate, &config, &ui_tx, &err_tx,
+                                        )
+                                        .await;
                                     }
-                                    // Ignore other commands while running
                                 }
-                                else => break,
                             }
                         }
                     }
-                    UiCommand::Abort => {
-                        // No-op if nothing running
-                    }
-                    UiCommand::ToggleYolo => {
-                        let on = !gate.is_permissive();
-                        gate.set_allow_all(on);
-                        let _ = ui_tx.send(UiEvent::YoloChanged(on));
-                    }
-                    UiCommand::SetModel(name) => {
-                        match crate::app::resolve_provider(&config, Some(&name)) {
-                            Ok((new_provider, resolved)) => {
-                                agent.set_provider(new_provider);
-                                let label = format!("{}/{}", resolved.provider_name, resolved.model);
-                                let _ = ui_tx.send(UiEvent::ModelChanged(label));
-                            }
-                            Err(e) => {
-                                let _ = err_tx.send(UiEvent::Error(format!("/model {name}: {e}")));
-                            }
+                    other => {
+                        if handle_command(other, &mut agent, &gate, &config, &ui_tx, &err_tx).await
+                        {
+                            break;
                         }
                     }
-                    UiCommand::Update => {
-                        // Runs off-loop: the download takes seconds and must
-                        // not freeze the input; the result comes back as a
-                        // notice bubble.
-                        let tx = ui_tx.clone();
-                        tokio::spawn(async move {
-                            let msg = match crate::update::update_once().await {
-                                Ok(lines) => lines.join("\n"),
-                                Err(e) => format!("/update failed: {e}"),
-                            };
-                            let _ = tx.send(UiEvent::Notice(msg));
-                        });
-                    }
-                    UiCommand::Compact => {
-                        let report = agent.compact_now().await;
-                        if report.turns_affected == 0 {
-                            let _ = ui_tx.send(UiEvent::Notice("nothing to compact".into()));
-                        }
-                        // 非零情况由 AgentEvent::Compacted 处理器统一通知
-                    }
-                    UiCommand::Quit => break,
                 }
             }
             // TUI loop ended
@@ -329,6 +315,67 @@ enum UiEvent {
     BranchChanged(Option<String>),
     /// A notice produced by the async side (e.g. "nothing to compact").
     Notice(String),
+}
+
+/// Execute one non-Submit command. Returns true when the TUI should quit.
+/// Shared by the idle loop and the post-run drain of mid-run commands.
+async fn handle_command(
+    cmd: UiCommand,
+    agent: &mut crab_core::agent::Agent,
+    gate: &crab_core::gate::PermissionGate,
+    config: &crab_core::config::Config,
+    ui_tx: &std::sync::mpsc::Sender<UiEvent>,
+    err_tx: &std::sync::mpsc::Sender<UiEvent>,
+) -> bool {
+    match cmd {
+        UiCommand::Abort => {
+            // No-op if nothing running (mid-run Abort is handled inline).
+            false
+        }
+        UiCommand::ToggleYolo => {
+            let on = !gate.is_permissive();
+            gate.set_allow_all(on);
+            let _ = ui_tx.send(UiEvent::YoloChanged(on));
+            false
+        }
+        UiCommand::SetModel(name) => {
+            match crate::app::resolve_provider(config, Some(&name)) {
+                Ok((new_provider, resolved)) => {
+                    agent.set_provider(new_provider);
+                    let label = format!("{}/{}", resolved.provider_name, resolved.model);
+                    let _ = ui_tx.send(UiEvent::ModelChanged(label));
+                }
+                Err(e) => {
+                    let _ = err_tx.send(UiEvent::Error(format!("/model {name}: {e}")));
+                }
+            }
+            false
+        }
+        UiCommand::Update => {
+            // Runs off-loop: the download takes seconds and must
+            // not freeze the input; the result comes back as a
+            // notice bubble.
+            let tx = ui_tx.clone();
+            tokio::spawn(async move {
+                let msg = match crate::update::update_once().await {
+                    Ok(lines) => lines.join("\n"),
+                    Err(e) => format!("/update failed: {e}"),
+                };
+                let _ = tx.send(UiEvent::Notice(msg));
+            });
+            false
+        }
+        UiCommand::Compact => {
+            let report = agent.compact_now().await;
+            if report.turns_affected == 0 {
+                let _ = ui_tx.send(UiEvent::Notice("nothing to compact".into()));
+            }
+            // 非零情况由 AgentEvent::Compacted 处理器统一通知
+            false
+        }
+        UiCommand::Submit(_) => false, // handled by the caller
+        UiCommand::Quit => true,
+    }
 }
 
 /// Synchronous TUI event loop.
@@ -553,12 +600,10 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
         _ => {}
     }
 
-    // If agent is running, don't process input keys
-    if state.is_running() {
-        return None;
-    }
-
-    // Input editing keys
+    // Input editing keys. These stay live while the agent runs: keystrokes
+    // buffer into the input box, Enter queues the prompt, and slash commands
+    // (e.g. /model) are dispatched and queued by the async side. Esc (abort)
+    // and scrolling are handled above.
     match code {
         Enter => {
             // Alt+Enter or Shift+Enter: insert newline (some terminals don't distinguish)
