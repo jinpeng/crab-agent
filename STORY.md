@@ -22,7 +22,7 @@ tool loop:
 - **Local observability**: versioned session log, `crab trace` (span tree),
   `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-340 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+356 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -95,11 +95,11 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 
 | | |
 |---|---|
-| Lines of Rust | ~15,700 |
-| Tests | 340 (3 timing-sensitive ignored) |
+| Lines of Rust | ~16,700 |
+| Tests | 356 (3 timing-sensitive ignored) |
 | Binary (release) | ~12 MiB |
 | Cold start | sub-second (vs ~150 ms for the Node-based pi it was measured against) |
-| Commits | 190 |
+| Commits | 194 |
 | Commits authored by crab | 21 |
 
 ## Design
@@ -121,7 +121,10 @@ select, release to copy) with proper spacing between messages, and **slash-comma
 hints** that complete commands *and their arguments* (`/model ` lists profiles,
 `/skill:` lists skills). It also ships a faithful pre-wrap of the transcript that
 fixed a ratatui rendering bug — over-wide rows were clipped and a character could
-silently disappear off screen.
+silently disappear off screen. And it installs like pi: a managed installer
+(`curl … install.sh | sh`) lays out versioned releases under
+`~/.crab/install/releases/`, a launcher resolves the current one at every start,
+and `crab update` / `/update` self-updates with checksum-verified downloads.
 Still deliberately future work: themes, session fork/branch, and a real extension
 API.
 
