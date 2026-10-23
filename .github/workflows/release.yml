@@ -124,13 +124,24 @@ jobs:
       - name: Show collected assets
         run: ls -l dist
 
+      # The installer and `crab update` both verify downloads against this
+      # file, so it must live in the same release as the tarballs.
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum crab-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
       # softprops/action-gh-release creates the release if it does not exist,
       # uploads the matching files, and fills in notes generated from the
       # commits since the previous tag. Re-running is safe: assets are replaced.
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
           generate_release_notes: true
           # Tags like v0.2.0-rc1 are published as pre-releases.
           prerelease: ${{ contains(github.ref_name, '-') }}

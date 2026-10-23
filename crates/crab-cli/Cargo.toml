@@ -9,6 +9,8 @@ name = "crab"
 path = "src/main.rs"
 
 [dependencies]
+reqwest.workspace = true
+sha2.workspace = true
 crab-core = { path = "../crab-core" }
 tokio.workspace = true
 tokio-util.workspace = true

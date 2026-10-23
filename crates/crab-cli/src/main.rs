@@ -7,6 +7,7 @@ mod status;
 mod theme;
 mod trace;
 mod tui;
+mod update;
 mod width;
 
 #[derive(Parser)]
@@ -41,6 +42,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Update a managed install to the latest release (no-op for cargo installs).
+    Update,
     /// Token/cost/latency report from the local metrics database.
     Metrics {
         /// Window in days (default 7).
@@ -57,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(Commands::Trace { file, json }) = &cli.command {
         return trace::run(file, *json);
+    }
+    if matches!(cli.command, Some(Commands::Update)) {
+        return update::run_update().await.map_err(|e| anyhow::anyhow!(e));
     }
     if let Some(Commands::Metrics { days, json }) = &cli.command {
         return metrics::report(*days, *json);

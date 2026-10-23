@@ -18,18 +18,42 @@ much of it was written by crab itself — see [STORY.md](STORY.md).
 
 ## Install
 
-Build from source with Cargo:
+Precompiled binaries, no Rust toolchain needed (macOS arm64, Linux x86_64/arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jinpeng/crab-agent/main/install.sh | sh
+```
+
+This is a *managed install* (same scheme as the pi coding agent): every
+version lands side-by-side under `~/.crab/install/releases/<ver>/`, a small
+launcher at `~/.crab/bin/crab` resolves the current one at every start, and
+`~/.local/bin/crab` symlinks to it (add `~/.local/bin` to your PATH if it is
+not already there). Downloads are verified against the release's
+`SHA256SUMS`. Re-running the installer installs the latest release;
+`CRAB_VERSION=0.4.0 sh install.sh` pins one.
+
+```sh
+crab update    # self-update a managed install to the latest release
+```
+
+`crab update` only touches managed installs; it refuses (with instructions)
+for `cargo install` builds. To uninstall:
+
+```sh
+CRAB_UNINSTALL=1 sh install.sh   # removes binaries; keeps config, sessions, metrics
+```
+
+Or build from source with Cargo:
 
 ```sh
 cargo install --path crates/crab-cli
 ```
 
-This installs a binary named `crab`. You need a Rust toolchain — the workspace
+That installs a binary named `crab`. You need a Rust toolchain — the workspace
 pins one in `rust-toolchain.toml` (rustfmt + clippy included). Two gotchas:
 re-installing the same version needs `cargo install --force --path crates/crab-cli`,
 and building from git (`cargo install --git …`) re-resolves all dependencies
-from crates.io — it needs network even when a local build works. No Rust
-handy? Use `install.sh` to download a precompiled binary instead.
+from crates.io — it needs network even when a local build works.
 
 ## Quickstart
 
@@ -70,6 +94,7 @@ elsewhere). Slash commands:
 | `/skill:<name> [args]` | inject a discovered skill's instructions as a user message |
 | `/skills` | open a picker listing discovered skills; fills `/skill:<name>` into the input |
 | `/compact` | compact the conversation now (shed old tool results; summarize if needed) |
+| `/update` | self-update a managed install to the latest release (refuses for cargo builds) |
 
 While the agent is running, **Ctrl-C aborts the current run** (it does not exit
 `crab` — the text and tool results produced so far are kept on disk). A Ctrl-C

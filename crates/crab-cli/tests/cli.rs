@@ -116,3 +116,98 @@ fn config_profile_resolves_and_runs_mock_style() {
         .failure()
         .stderr(predicates::str::contains("unknown provider").not());
 }
+
+/// Hermetic managed-install round trip: install.sh installs the pinned
+/// release into a temp HOME, the launcher runs it, uninstall keeps config.
+/// Network-dependent (downloads the real release asset).
+#[test]
+fn managed_install_installs_runs_and_uninstalls() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let installer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("install.sh");
+    std::fs::create_dir_all(home.join(".crab")).unwrap();
+    std::fs::write(
+        home.join(".crab/config.toml"),
+        "[providers.p]\napi_key = \"k\"\n",
+    )
+    .unwrap();
+
+    // PATH 收窄，避免开发者本机已装的 crab 触发"existing install"分支差异。
+    let minimal_path = "/usr/bin:/bin";
+    let mut install = Command::new("sh");
+    install
+        .arg(&installer)
+        .env("HOME", home)
+        .env("PATH", minimal_path)
+        .env("CRAB_VERSION", "0.4.0");
+    install.assert().success();
+
+    // Launcher resolves through the entrypoint symlink to the real binary.
+    let entrypoint = home.join(".local/bin/crab");
+    assert!(entrypoint.exists());
+    Command::new(&entrypoint)
+        .env("PATH", minimal_path)
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("0.4.0"));
+    // Managed markers exist.
+    assert_eq!(
+        std::fs::read_to_string(home.join(".crab/install/current-version")).unwrap(),
+        "0.4.0\n"
+    );
+
+    // Uninstall removes binaries but keeps config.
+    let mut uninstall = Command::new("sh");
+    uninstall
+        .arg(&installer)
+        .env("HOME", home)
+        .env("PATH", minimal_path)
+        .env("CRAB_UNINSTALL", "1");
+    uninstall.assert().success();
+    assert!(!home.join(".crab/bin/crab").exists());
+    assert!(!home.join(".crab/install").exists());
+    assert!(!entrypoint.exists());
+    assert!(home.join(".crab/config.toml").exists(), "config kept");
+
+    // Second uninstall refuses cleanly.
+    let mut again = Command::new("sh");
+    again
+        .arg(&installer)
+        .env("HOME", home)
+        .env("PATH", minimal_path)
+        .env("CRAB_UNINSTALL", "1");
+    again.assert().failure();
+}
+
+/// download_release fetches the real v0.4.0 asset, verifies SHA256SUMS,
+/// and extracts a runnable binary. Network-dependent.
+#[test]
+fn managed_update_download_verifies_and_extracts() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .user_agent("crab-test")
+            .build()
+            .unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let triple = crab_bin_target_triple();
+        let binary = update::download_release(&client, "0.4.0", triple, staging.path())
+            .await
+            .unwrap();
+        let out = Command::new(&binary).arg("--version").output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("0.4.0"));
+    });
+}
+
+/// crab-cli is a binary crate, so the integration tests pull update.rs in
+/// directly to exercise the download/verify/extract chain for real.
+#[path = "../src/update.rs"]
+#[allow(dead_code)]
+mod update;
+
+fn crab_bin_target_triple() -> &'static str {
+    update::target_triple().expect("this platform has a prebuilt release")
+}

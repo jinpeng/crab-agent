@@ -229,6 +229,19 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
                             }
                         }
                     }
+                    UiCommand::Update => {
+                        // Runs off-loop: the download takes seconds and must
+                        // not freeze the input; the result comes back as a
+                        // notice bubble.
+                        let tx = ui_tx.clone();
+                        tokio::spawn(async move {
+                            let msg = match crate::update::update_once().await {
+                                Ok(lines) => lines.join("\n"),
+                                Err(e) => format!("/update failed: {e}"),
+                            };
+                            let _ = tx.send(UiEvent::Notice(msg));
+                        });
+                    }
                     UiCommand::Compact => {
                         let report = agent.compact_now().await;
                         if report.turns_affected == 0 {
@@ -298,6 +311,8 @@ enum UiCommand {
     SetModel(String),
     /// `/compact`: compact the conversation immediately.
     Compact,
+    /// `/update`: self-update a managed install (async; result as a notice).
+    Update,
 }
 
 /// Events to TUI from agent/async context.
@@ -664,6 +679,9 @@ fn dispatch_slash(
             None => state
                 .notice("no skills found (looked in ~/.agents/skills and project .agents/skills)"),
         },
+        state::SlashCommand::Update => {
+            let _ = cmd_tx.blocking_send(UiCommand::Update);
+        }
         state::SlashCommand::Compact => {
             let _ = cmd_tx.blocking_send(UiCommand::Compact);
         }

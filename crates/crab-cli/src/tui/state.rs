@@ -236,6 +236,8 @@ pub enum SlashCommand {
     PickSkill,
     /// Compact the conversation now (`/compact`).
     Compact,
+    /// Self-update a managed install (`/update`).
+    Update,
     /// Unrecognized `/something`.
     Unknown(String),
 }
@@ -348,6 +350,7 @@ pub fn parse_slash(text: &str) -> Option<SlashCommand> {
         "models" => SlashCommand::PickModel,
         "skills" => SlashCommand::PickSkill,
         "compact" => SlashCommand::Compact,
+        "update" => SlashCommand::Update,
         other if other.starts_with("skill:") => {
             let name = other["skill:".len()..].trim().to_string();
             SlashCommand::Skill(name, arg)
