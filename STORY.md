@@ -102,7 +102,7 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 | Lines of Rust | ~16,700 |
 | Tests | 356 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
 | Binary (release) | ~12 MiB |
-| Cold start | sub-second (vs ~150 ms for the Node-based pi it was measured against) |
+| Cold start | ~5 ms `crab --version` (vs ~150 ms for pi 1.3.0, measured on the same machine) |
 | Commits | 194 |
 | Commits authored by crab | 21 |
 
