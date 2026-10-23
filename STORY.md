@@ -6,7 +6,7 @@ it was built by crab itself.**
 
 ## What it is
 
-A single ~10 MiB binary that starts in milliseconds and drives a model through a real
+A single ~12 MiB binary that starts in milliseconds and drives a model through a real
 tool loop:
 
 - **7 built-in tools**: `read`, `write`, `edit`, `bash`, `glob`, `grep`, `web_fetch`
@@ -32,8 +32,8 @@ commit whose diff was produced entirely by crab itself.** Not a benchmark, not a
 a real commit in the history.
 
 That was reached at commit `f3fec8e` ("dogfood"), where crab added `Session::len` + a
-test. From there it snowballed. Of ~124 commits, **20 were authored by crab** (via
-DeepSeek), each one produced by handing crab a task spec in its own repo and reviewing
+test. From there it snowballed. Of ~194 commits to date, **21 were authored by crab**
+(via DeepSeek), each one produced by handing crab a task spec in its own repo and reviewing
 the result:
 
 - The entire TUI layer: semantic color theme, ANSI-aware width helpers, the status
@@ -44,7 +44,11 @@ the result:
 - `grep` respecting `.gitignore`
 - The MCP client: `Tool::name → Cow` refactor, config sections, the stdio client,
   tool wrapping, startup wiring
-- This README and `install.sh`
+- This README and the original (cargo-based) `install.sh` — since replaced by the
+  managed binary installer
+- The built-in pricing table's legacy DeepSeek "effective since" dates — verified
+  with cited sources, and it *overturned the premise*: the "stale" prices were
+  the current cards, mislabeled (see the dogfood log)
 
 The dogfood log is in [docs/dogfood-log.md](docs/dogfood-log.md).
 
@@ -96,7 +100,7 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 | | |
 |---|---|
 | Lines of Rust | ~16,700 |
-| Tests | 356 (3 timing-sensitive ignored) |
+| Tests | 356 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
 | Binary (release) | ~12 MiB |
 | Cold start | sub-second (vs ~150 ms for the Node-based pi it was measured against) |
 | Commits | 194 |
