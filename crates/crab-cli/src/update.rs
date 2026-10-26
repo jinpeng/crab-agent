@@ -121,6 +121,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Error text for a failed request, naming the proxy escape hatch — on
+/// networks where GitHub needs a proxy the fix is environmental, and the
+/// message should say so instead of leaving a bare timeout.
+fn net_err(e: impl std::fmt::Display) -> String {
+    format!(
+        "could not reach GitHub ({e}).\n\
+         \x20   If your network requires a proxy: export HTTPS_PROXY=http://<host>:<port> first"
+    )
+}
+
 /// Latest release version (without the `v` prefix) from the GitHub API.
 pub async fn fetch_latest(client: &reqwest::Client) -> Result<String, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
@@ -128,11 +138,13 @@ pub async fn fetch_latest(client: &reqwest::Client) -> Result<String, String> {
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("could not reach GitHub ({e})"))?
+        .map_err(net_err)?
         .text()
         .await
-        .map_err(|e| format!("could not read GitHub response ({e})"))?;
-    parse_latest_tag(&json).ok_or_else(|| "could not parse the latest release tag".to_string())
+        .map_err(net_err)?;
+    parse_latest_tag(&json).ok_or_else(|| {
+        "could not parse the latest release tag (unexpected GitHub API response)".to_string()
+    })
 }
 
 /// Download one release tarball into `staging`, verify it against the
@@ -152,10 +164,10 @@ pub async fn download_release(
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("download failed: {e}"))?
+            .map_err(net_err)?
             .bytes()
             .await
-            .map_err(|e| format!("download failed: {e}"))
+            .map_err(net_err)
     };
 
     let sums = fetch(format!("{base}/SHA256SUMS")).await?;
