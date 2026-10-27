@@ -22,7 +22,7 @@ tool loop:
 - **Local observability**: versioned session log, `crab trace` (span tree),
   `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-360 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+365 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -99,11 +99,11 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 
 | | |
 |---|---|
-| Lines of Rust | ~17,000 |
-| Tests | 360 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
+| Lines of Rust | ~17,100 |
+| Tests | 365 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
 | Binary (release) | ~12 MiB |
 | Cold start | ~5 ms `crab --version` (vs ~150 ms for pi 1.3.0, measured on the same machine) |
-| Commits | 199 |
+| Commits | 205 |
 | Commits authored by crab | 21 |
 
 ## Design
@@ -114,7 +114,7 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.4.1. It works, it self-builds, and it's published. The honest label is "early but
+v0.4.2. It works, it self-builds, and it's published. The honest label is "early but
 real": the core loop, tools, config, MCP, and TUI are solid and tested. Since v0.3.0
 it gained **context compaction** (deterministic tool-result shedding plus on-demand
 LLM summary, replayable from the log — the session file is never rewritten), a
@@ -134,7 +134,11 @@ percent now drops right when `/compact` sheds (previously it hung at the
 pre-shed value until the next call, and the auto-compact trigger could fire a
 second time immediately), and input stays live while the agent runs — typing
 `/model` mid-run used to be swallowed whole, now it queues and takes effect
-when the run finishes, along with any type-ahead prompts.
+when the run finishes, along with any type-ahead prompts. v0.4.2 adds a per-provider `mcp_allowlist`
+so providers with tool-schema size caps (Moonshot) can exclude MCP servers
+that ship oversized schemas — the config field rides the resolved provider
+and excluded servers are never spawned — and schema-size 400s now name the
+knob in the error.
 Still deliberately future work: themes, session fork/branch, and a real extension
 API.
 
