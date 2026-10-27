@@ -7,6 +7,11 @@ pub struct ProviderProfile {
     pub model: String,
     pub api_key: Option<String>,
     pub context_window: Option<u64>,
+    /// Only start these `[mcp.*]` servers for this profile (None = all).
+    /// Providers with schema-size limits (e.g. Moonshot) can be kept working
+    /// by excluding MCP servers that ship oversized tool schemas.
+    #[serde(default)]
+    pub mcp_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -94,6 +99,8 @@ pub struct ResolvedProvider {
     pub api_key: String,
     pub context_window: Option<u64>,
     pub provider_name: String,
+    /// MCP servers to start for this profile (None = all enabled ones).
+    pub mcp_allowlist: Option<Vec<String>>,
 }
 
 /// Threshold resolution: env wins over the config file; default 0.8.
@@ -125,6 +132,7 @@ pub fn resolve_credentials(
             // still applies (debugging auto-compaction with --provider mock).
             context_window: get_env("CRAB_CONTEXT_WINDOW").and_then(|s| s.parse().ok()),
             provider_name: "mock".into(),
+            mcp_allowlist: None,
         });
     }
 
@@ -144,6 +152,7 @@ pub fn resolve_credentials(
             api_key,
             context_window: get_env("CRAB_CONTEXT_WINDOW").and_then(|s| s.parse().ok()),
             provider_name: "openai".into(),
+            mcp_allowlist: None,
         });
     }
 
@@ -195,12 +204,37 @@ pub fn resolve_credentials(
         api_key,
         context_window,
         provider_name: name,
+        mcp_allowlist: profile.mcp_allowlist.clone(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_allowlist_parses_and_resolves_to_provider() {
+        let toml_str = r#"
+[providers.kimi]
+base_url = "https://api.moonshot.cn/v1"
+api_key = "sk-k"
+model = "moonshot-v1-8k"
+mcp_allowlist = ["brave-search"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let r = resolve_credentials(&config, Some("kimi"), &|_| None).unwrap();
+        assert_eq!(r.mcp_allowlist, Some(vec!["brave-search".to_string()]));
+        // 省略时默认为 None（全部 MCP server）。
+        let toml_default = r#"
+[providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+api_key = "sk-d"
+model = "deepseek-chat"
+"#;
+        let config: Config = toml::from_str(toml_default).unwrap();
+        let r = resolve_credentials(&config, Some("deepseek"), &|_| None).unwrap();
+        assert_eq!(r.mcp_allowlist, None);
+    }
 
     #[test]
     fn auto_compact_threshold_defaults_and_overrides() {

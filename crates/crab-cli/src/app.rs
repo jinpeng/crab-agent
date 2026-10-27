@@ -156,7 +156,13 @@ pub async fn build_agent(
     let mut tools = register_all(SessionState::default(), gate.clone());
     // MCP servers come up before the session is created: a server that fails to
     // start is only ever a warning, never a reason not to start crab.
-    let mcp_clients = attach_mcp_servers(&config, gate.clone(), &mut tools).await;
+    let mcp_clients = attach_mcp_servers(
+        &config,
+        gate.clone(),
+        &mut tools,
+        resolved.mcp_allowlist.as_deref(),
+    )
+    .await;
 
     let dir = sessions_dir(&cwd);
     let session = if continue_ {
@@ -266,6 +272,7 @@ pub fn resolve_provider(
                     .ok()
                     .and_then(|s| s.parse().ok()),
                 provider_name: "mock".into(),
+                mcp_allowlist: None,
             },
         )),
         _ => {
@@ -290,16 +297,34 @@ pub fn resolve_provider(
 /// server cannot keep crab from starting.
 ///
 /// Servers start in name order so the warnings a user sees are deterministic.
+/// Which `[mcp.*]` servers to start, in deterministic name order. An
+/// allowlist (from the provider profile) excludes everything else — excluded
+/// servers are not even spawned, which matters when a server is expensive to
+/// start or ships oversized tool schemas.
+pub(crate) fn mcp_names_to_start<'a>(
+    config: &'a crab_core::config::Config,
+    allowlist: Option<&[String]>,
+) -> Vec<&'a str> {
+    let mut names: Vec<&str> = config.mcp.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    match allowlist {
+        Some(list) => names
+            .into_iter()
+            .filter(|n| list.iter().any(|a| a == n))
+            .collect(),
+        None => names,
+    }
+}
+
 async fn attach_mcp_servers(
     config: &crab_core::config::Config,
     gate: PermissionGate,
     tools: &mut ToolRegistry,
+    allowlist: Option<&[String]>,
 ) -> Vec<Arc<McpClient>> {
     let mut clients = Vec::new();
-    let mut names: Vec<&str> = config.mcp.keys().map(String::as_str).collect();
-    names.sort_unstable();
 
-    for name in names {
+    for name in mcp_names_to_start(config, allowlist) {
         let srv = &config.mcp[name];
         if !srv.is_enabled() {
             continue;
@@ -333,6 +358,34 @@ async fn attach_mcp_servers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_names_to_start_filters_by_allowlist_before_any_spawn() {
+        let toml_str = r#"
+[mcp.rea]
+command = "rea"
+args = ["mcp"]
+
+[mcp.brave-search]
+command = "npx"
+args = ["-y", "server-brave-search"]
+"#;
+        let config = crab_core::config::Config {
+            ..toml::from_str(toml_str).unwrap()
+        };
+        // None = 全部（确定性排序）。
+        assert_eq!(
+            mcp_names_to_start(&config, None),
+            vec!["brave-search", "rea"]
+        );
+        // allowlist 只保留列名的——被排除的根本不会被 spawn。
+        assert_eq!(
+            mcp_names_to_start(&config, Some(&["brave-search".to_string()])),
+            vec!["brave-search"]
+        );
+        // 名单外的名字静默忽略（与 MCP spawn 的 best-effort 语义一致）。
+        assert!(mcp_names_to_start(&config, Some(&["nope".to_string()])).is_empty());
+    }
 
     #[test]
     fn system_prompt_includes_agents_md() {
@@ -401,7 +454,8 @@ command = "/nonexistent/crab-mcp-server-that-is-not-here"
         )
         .unwrap();
         let mut tools = built_in_registry();
-        let clients = attach_mcp_servers(&config, PermissionGate::auto_approve(), &mut tools).await;
+        let clients =
+            attach_mcp_servers(&config, PermissionGate::auto_approve(), &mut tools, None).await;
 
         assert!(clients.is_empty(), "a failed server must not be kept alive");
         for name in ["read", "write", "edit", "bash", "glob", "grep", "web_fetch"] {
@@ -421,7 +475,8 @@ enabled = false
         )
         .unwrap();
         let mut tools = built_in_registry();
-        let clients = attach_mcp_servers(&config, PermissionGate::auto_approve(), &mut tools).await;
+        let clients =
+            attach_mcp_servers(&config, PermissionGate::auto_approve(), &mut tools, None).await;
         assert!(clients.is_empty());
     }
 
@@ -433,6 +488,7 @@ enabled = false
             &Config::default(),
             PermissionGate::auto_approve(),
             &mut tools,
+            None,
         )
         .await;
         assert!(clients.is_empty());

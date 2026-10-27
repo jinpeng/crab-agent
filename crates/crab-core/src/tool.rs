@@ -134,3 +134,21 @@ mod tests {
         assert_eq!(reg.schemas()[0]["name"], "srv__tool");
     }
 }
+
+#[cfg(test)]
+mod size_probe {
+    #[test]
+    fn print_builtin_schema_sizes() {
+        let reg = crate::tools::register_all(
+            crate::state::SessionState::default(),
+            crate::gate::PermissionGate::auto_approve(),
+        );
+        let mut total = 0;
+        for s in reg.schemas() {
+            let n = serde_json::to_string(&s).unwrap().len();
+            total += n;
+            println!("{:12} {n} bytes", s["name"]);
+        }
+        println!("TOTAL        {total} bytes");
+    }
+}

@@ -202,7 +202,20 @@ impl OpenAiProvider {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let mut body = resp.text().await.unwrap_or_default();
+            // Schema-size rejections (e.g. Moonshot's tools schema cap, usually
+            // caused by MCP servers shipping oversized tool schemas) get an
+            // actionable hint instead of a bare provider message.
+            if status.as_u16() == 400
+                && body.contains("schema")
+                && body.contains("maximum allowed size")
+            {
+                body.push_str(
+                    "\n\n[crab] hint: the combined tool schemas exceed this provider's limit. \
+                     Set `mcp_allowlist` on the provider profile in ~/.crab/config.toml to \
+                     exclude MCP servers with large tool schemas.",
+                );
+            }
             return Err(ProviderError::Api {
                 status: status.as_u16(),
                 body,
@@ -505,6 +518,60 @@ mod tools_in_request_tests {
                 .set_body_string("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
                 .insert_header("content-type", "text/event-stream")
         }
+    }
+
+    #[tokio::test]
+    async fn schema_size_400_gets_an_actionable_hint() {
+        // Moonshot rejects oversized combined tool schemas with a 400 whose
+        // body names the schema size limit; crab appends a config hint so the
+        // user knows about mcp_allowlist instead of staring at a bare error.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"tools.function.parameters is not a valid moonshot flavored json schema, details: <At path 'root': schema exceeds maximum allowed size>","type":"invalid_request_error"}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m");
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        }];
+        let err = p.complete(&msgs, &[], None).await.unwrap_err();
+        let ProviderError::Api { status, body } = err else {
+            panic!("expected Api error, got {err:?}");
+        };
+        assert_eq!(status, 400);
+        assert!(
+            body.contains("mcp_allowlist"),
+            "hint must name the knob: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_400_keeps_the_body_untouched() {
+        // The hint must not fire for unrelated 400s (e.g. bad messages).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error":{"message":"invalid messages"}}"#),
+            )
+            .mount(&server)
+            .await;
+        let p = OpenAiProvider::new(server.uri(), "k", "m");
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        }];
+        let err = p.complete(&msgs, &[], None).await.unwrap_err();
+        let ProviderError::Api { body, .. } = err else {
+            panic!("expected Api error, got {err:?}");
+        };
+        assert!(
+            !body.contains("mcp_allowlist"),
+            "no hint for plain 400: {body}"
+        );
     }
 
     #[tokio::test]
