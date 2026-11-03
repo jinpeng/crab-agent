@@ -127,7 +127,7 @@ pub fn latest_session(dir: &Path) -> Option<PathBuf> {
 
 /// 注入 Lessons 段：重放 `.crab/sessions` 全部会话的 Lesson 事件，最新在前，
 /// 超预算截断（P0-1 纪律）。库不可读只警告——记忆是增强，不是启动条件。
-fn with_lessons(system_prompt: String, cwd: &Path) -> String {
+pub fn with_lessons(system_prompt: String, cwd: &Path) -> String {
     match crab_core::lesson::load_library(&sessions_dir(cwd)) {
         Ok(mut lessons) => {
             lessons.reverse(); // load_library 产出日志序 → 最新在前

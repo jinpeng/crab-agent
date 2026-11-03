@@ -26,6 +26,29 @@ fn print_mode_runs_and_exits_zero() {
 }
 
 #[test]
+fn show_system_prompt_prints_built_prompt_with_lessons() {
+    let dir = tempfile::tempdir().unwrap();
+    // 预置一条 Lesson obs（模拟已确认的 /reflect），验证重放注入路径。
+    let sessions = dir.path().join(".crab/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join("session-1.jsonl"),
+        "{\"kind\":\"obs\",\"id\":1,\"event\":{\"run_id\":0,\"ts\":1,\"obs\":\"lesson\",\"kind\":\"fact\",\"text\":\"in this project, sessions live under .crab/sessions\",\"evidence\":0,\"supersedes\":null}}\n",
+    )
+    .unwrap();
+    crab_in(&dir)
+        .arg("--show-system-prompt")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "# Lessons (from previous sessions in this project)",
+        ))
+        .stdout(predicate::str::contains(
+            "[fact] in this project, sessions live under .crab/sessions",
+        ));
+}
+
+#[test]
 fn print_mode_streams_text_to_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let mut cmd = crab_in(&dir);

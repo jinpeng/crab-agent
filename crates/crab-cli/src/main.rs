@@ -29,6 +29,11 @@ pub struct Cli {
     /// Extra system prompt appended after base + AGENTS.md
     #[arg(long)]
     system: Option<String>,
+    /// Print the fully built system prompt (base + AGENTS.md + lessons) and exit.
+    /// Debug/acceptance knob: lets scripts assert what the model would see without
+    /// a provider round trip.
+    #[arg(long)]
+    show_system_prompt: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -69,6 +74,18 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(prompt) = cli.print.clone() {
         return run_print(&cli, prompt).await;
+    }
+    if cli.show_system_prompt {
+        // 只组装不运行：与 build_agent 同一条路径（build_system_prompt +
+        // with_lessons），供验收脚本断言模型实际看到的 prompt。
+        let cwd = std::env::current_dir()?;
+        let skills = crab_core::skills::discover(&cwd, &std::env::home_dir().unwrap_or_default());
+        let sp = app::with_lessons(
+            app::build_system_prompt(&cwd, cli.system.clone(), &skills),
+            &cwd,
+        );
+        println!("{sp}");
+        return Ok(());
     }
     let cfg = app::AppConfig::from(&cli);
     tui::run(&cfg, cli.continue_).await

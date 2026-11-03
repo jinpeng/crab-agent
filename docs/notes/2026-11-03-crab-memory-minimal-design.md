@@ -6,6 +6,13 @@
 > [harness² 应用建议](2026-10-23-harness2-application-proposal.md)的 P0-2/P1-3。
 > 目标：提取**有效最小设计**——一个 spike（天级）能落地、dogfood 两周后能
 > 判断方向是否对的版本。
+>
+> **实现状态（2026-11-03）**：v1 已全部落地（commits 4db6f95、d5060da）。
+> Lesson event + `lesson` 重放模块 + `/reflect`（提议→confirm modal 逐条
+> 人审→`gate::ask` 落盘）+ system prompt 注入（1500 token 预算）+
+> `--show-system-prompt` 调试旗标 + `scripts/memory_acceptance.sh`
+> （六步验收中 1/2/4/5/6 自动化，8/8 通过）。步骤 3（真实 LLM 用上召回）
+> 与 supersede 的 /reflect UI 留待 dogfood。
 
 ## 设计原则（每条都有调研依据）
 
