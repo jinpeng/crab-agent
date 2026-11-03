@@ -242,6 +242,7 @@ pub async fn build_agent(
             context_window: resolved.context_window,
             auto_compact_threshold: config.auto_compact_threshold(),
             compactions,
+            mcp_allowlist: resolved.mcp_allowlist.clone(),
         },
     );
     Ok(Startup {

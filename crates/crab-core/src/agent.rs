@@ -97,6 +97,11 @@ pub struct AgentConfig {
     pub auto_compact_threshold: f64,
     /// Compactions replayed from the session log at --continue.
     pub compactions: Vec<crate::compact::AppliedCompaction>,
+    /// Per-provider MCP allowlist, re-applied at every request: servers are
+    /// spawned once at startup, but the *advertised* tool set must follow the
+    /// active provider — `/model`-switching to a capped provider (Moonshot)
+    /// must not send another profile's MCP schemas. None = advertise all.
+    pub mcp_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -232,6 +237,43 @@ impl Agent {
     /// runs (e.g. the TUI's `/model`); must NOT be called while `run` holds `&mut self`.
     pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
         self.provider = provider;
+    }
+
+    /// /model 切换 provider 时同步它的 mcp_allowlist（见 AgentConfig 字段注释）。
+    pub fn set_mcp_allowlist(&mut self, allowlist: Option<Vec<String>>) {
+        self.config.mcp_allowlist = allowlist;
+    }
+
+    /// 当前注册、但会被生效中的 allowlist 排除的 MCP server 名（供 /model
+    /// 切换后的提示：server 进程还在跑，只是不广告给这个 provider）。
+    pub fn excluded_mcp_servers(&self) -> Vec<String> {
+        let servers = self.tools.mcp_servers();
+        match &self.config.mcp_allowlist {
+            None => Vec::new(),
+            Some(list) => servers
+                .into_iter()
+                .filter(|s| !list.iter().any(|a| a == s))
+                .collect(),
+        }
+    }
+
+    /// 发给 provider 的工具 schema：按生效中的 mcp_allowlist 过滤（请求级，
+    /// 不摘注册表——进程与注册都不动，只是不广告）。MCP 工具名形如
+    /// `{server}__{tool}`；内置工具名不含 `__`，永远放行。
+    fn request_schemas(&self) -> Vec<serde_json::Value> {
+        let all = self.tools.schemas();
+        match &self.config.mcp_allowlist {
+            None => all,
+            Some(list) => all
+                .into_iter()
+                .filter(
+                    |s| match s["name"].as_str().and_then(|n| n.split_once("__")) {
+                        Some((server, _)) => list.iter().any(|a| a == server),
+                        None => true,
+                    },
+                )
+                .collect(),
+        }
     }
 
     /// 手动 /compact 入口：无视阈值，立即执行一次压缩（spec §4）。
@@ -607,7 +649,7 @@ impl Agent {
             // Race the model call against abort (Q11 cancel-safety): if abort fires
             // mid-stream, drop the call (a kill_on_drop-style cancel) and persist what
             // we already have. Tool results from prior turns are already recorded.
-            let tool_schemas = self.tools.schemas();
+            let tool_schemas = self.request_schemas();
             // Inject system prompt as the first message for THIS call only (not history).
             // The history goes through the compaction view: full fidelity stays in
             // the log; the provider sees the compressed view.
@@ -1293,6 +1335,58 @@ pub(crate) mod tests {
         );
         assert_eq!(agent.append_lesson(crate::obs::LessonKind::Fact, "x"), None);
         assert_eq!(agent.session.entries().len(), 1); // 只有 meta 行
+    }
+
+    #[test]
+    fn request_schemas_filter_follows_provider_allowlist() {
+        struct Named(&'static str);
+        #[async_trait]
+        impl Tool for Named {
+            fn name(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed(self.0)
+            }
+            fn description(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("x")
+            }
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object"})
+            }
+            async fn execute(&self, _a: serde_json::Value) -> Result<String, ToolError> {
+                Ok("done".into())
+            }
+        }
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop)); // 内置：永远放行
+        tools.register(Box::new(Named("rea__search")));
+        tools.register(Box::new(Named("brave-search__web")));
+        assert_eq!(
+            tools.mcp_servers(),
+            vec!["brave-search".to_string(), "rea".to_string()]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(MockProvider::new(vec![])),
+            tools,
+            session,
+            AgentConfig::default(), // allowlist None → 全部
+        );
+        assert_eq!(agent.request_schemas().len(), 3);
+        assert!(agent.excluded_mcp_servers().is_empty());
+
+        // /model 切到带 allowlist 的 provider：rea 被请求级过滤。
+        agent.set_mcp_allowlist(Some(vec!["brave-search".to_string()]));
+        let schemas = agent.request_schemas();
+        assert_eq!(schemas.len(), 2);
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"noop"));
+        assert!(names.contains(&"brave-search__web"));
+        assert!(!names.contains(&"rea__search"));
+        assert_eq!(agent.excluded_mcp_servers(), vec!["rea".to_string()]);
     }
 
     #[tokio::test]

@@ -344,6 +344,19 @@ async fn handle_command(
             match crate::app::resolve_provider(config, Some(&name)) {
                 Ok((new_provider, resolved)) => {
                     agent.set_provider(new_provider);
+                    // allowlist 是 spawn 时的一阶约束，也是请求时的二阶约束：
+                    // 切到带 allowlist 的 provider（如 Moonshot 系的 kimi）必须
+                    // 同步过滤广告给模型的 MCP 工具，否则上个 profile spawn 的
+                    // 大 schema server（如 rea 3.4MB/207 tools）会随请求发过去。
+                    agent.set_mcp_allowlist(resolved.mcp_allowlist.clone());
+                    let excluded = agent.excluded_mcp_servers();
+                    if !excluded.is_empty() {
+                        let _ = ui_tx.send(UiEvent::Notice(format!(
+                            "{name}: not advertising tools from mcp servers: {} \
+                             (still running; adjust mcp_allowlist to change)",
+                            excluded.join(", ")
+                        )));
+                    }
                     let label = format!("{}/{}", resolved.provider_name, resolved.model);
                     let _ = ui_tx.send(UiEvent::ModelChanged(label));
                 }

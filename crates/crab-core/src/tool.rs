@@ -38,6 +38,18 @@ impl ToolRegistry {
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
+    /// 已注册的 MCP server 名（去重、排序）——从 `{server}__{tool}` 工具名
+    /// 推导；内置工具名不含 `__`，不参与。
+    pub fn mcp_servers(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .tools
+            .keys()
+            .filter_map(|n| n.split_once("__").map(|(s, _)| s.to_string()))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
     /// Full OpenAI-style function schemas: {name, description, parameters}.
     /// `Tool::schema()` yields only the parameters object; we wrap it here so every
     /// tool gets name+description without duplicating them. (DeepSeek 422 regression:
