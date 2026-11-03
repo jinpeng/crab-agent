@@ -22,7 +22,7 @@ tool loop:
 - **Local observability**: versioned session log, `crab trace` (span tree),
   `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-365 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+371 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -114,7 +114,7 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.4.2. It works, it self-builds, and it's published. The honest label is "early but
+v0.4.3. It works, it self-builds, and it's published. The honest label is "early but
 real": the core loop, tools, config, MCP, and TUI are solid and tested. Since v0.3.0
 it gained **context compaction** (deterministic tool-result shedding plus on-demand
 LLM summary, replayable from the log — the session file is never rewritten), a
@@ -138,7 +138,11 @@ when the run finishes, along with any type-ahead prompts. v0.4.2 adds a per-prov
 so providers with tool-schema size caps (Moonshot) can exclude MCP servers
 that ship oversized schemas — the config field rides the resolved provider
 and excluded servers are never spawned — and schema-size 400s now name the
-knob in the error.
+knob in the error. v0.4.3 makes the input box pi-like: a long prompt wraps
+on word boundaries (continuation rows indent under the prompt, wide chars
+never split), the box grows with the content up to 10 rows, and past that it
+scrolls internally with the cursor row always visible — previously a long
+line overflowed the single-row box and was clipped.
 Still deliberately future work: themes, session fork/branch, and a real extension
 API.
 
