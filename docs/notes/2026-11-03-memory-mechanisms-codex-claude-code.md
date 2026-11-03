@@ -4,6 +4,8 @@
 > 与 Claude Code 官方 Memory 文档。上一篇：[2026-10-23 pi 与 dsh 调研](2026-10-23-memory-mechanisms-pi-dsh.md)——pi/dsh 两个系统均无 first-party memory；主流 harness 的图景已经改变：
 > **Codex 与 Claude Code 都已有“人工维护的长期指令 ＋ 自动积累的记忆”**。
 > 调研问题不变：对 crab 的 lesson library（harness² 提案 P1）有什么参照。
+> 同日另见：[开源 Agent Memory 项目调研](2026-11-03-open-source-agent-memory.md)
+> （记忆基础设施层）。
 
 ## TL;DR
 
