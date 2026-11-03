@@ -17,13 +17,18 @@ use crate::width::visible_width;
 /// Draw the full TUI.
 pub fn draw(f: &mut Frame, state: &mut TuiState) {
     state.sync_slash_hint();
+    // The input box grows with its (wrapped) content, pi-style, capped so the
+    // transcript always keeps room; past the cap the box scrolls internally
+    // with the cursor row kept visible (see draw_input).
+    let input_rows = state.input.layout(f.area().width).lines.len();
+    let input_height = input_rows.min(MAX_INPUT_ROWS) as u16 + 2;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),    // Transcript
-            Constraint::Length(3), // Input box
-            Constraint::Length(1), // cwd row
-            Constraint::Length(1), // status row
+            Constraint::Min(3),               // Transcript
+            Constraint::Length(input_height), // Input box
+            Constraint::Length(1),            // cwd row
+            Constraint::Length(1),            // status row
         ])
         .split(f.area());
 
@@ -269,6 +274,11 @@ fn draw_status_rows(f: &mut Frame, state: &TuiState, areas: &[Rect]) {
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPINNER_FRAME_MS: u128 = 100;
 
+/// Input box growth cap: at most this many text rows before the box scrolls
+/// internally (pi keeps the transcript reachable while a long prompt is
+/// being composed).
+const MAX_INPUT_ROWS: usize = 10;
+
 /// Input-box title shown while the agent runs: an animated spinner and an
 /// elapsed timer, so a long turn reads as "working", not "frozen".
 fn running_title(state: &TuiState) -> String {
@@ -283,19 +293,12 @@ fn running_title(state: &TuiState) -> String {
     )
 }
 
-/// Cursor column within the input area: the 6-column prompt prefix plus the
-/// display width of the current line up to the cursor. Display width, not
-/// char count — a CJK char occupies two columns, so counting `chars()` puts
-/// the cursor one cell short per wide char.
-fn cursor_column(input_text: &str, cursor_byte: usize) -> usize {
-    let line_start = input_text[..cursor_byte]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    6 + crate::width::display_width(&input_text[line_start..cursor_byte])
-}
-
 /// Draw the input box.
+///
+/// Long lines were already word-wrapped by [`InputBuffer::layout`]; the box
+/// height follows the wrapped row count (capped at [`MAX_INPUT_ROWS`]). Past
+/// the cap the paragraph scrolls so the cursor row stays visible — a long
+/// composition must never push the cursor out of the box.
 fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
     let is_running = state.is_running();
 
@@ -311,35 +314,39 @@ fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
         Style::default().fg(Color::Blue)
     };
 
-    let input_lines = state.input.to_lines(area.width);
+    let layout = state.input.layout(area.width);
+    let rows = layout.lines.len();
+    let max_rows = (area.height as usize).saturating_sub(2);
+    let start = if rows > max_rows {
+        layout.cursor_row.saturating_sub(max_rows.saturating_sub(1))
+    } else {
+        0
+    };
+
     let title = if is_running {
         running_title(state)
     } else {
         String::new()
     };
-    let paragraph = Paragraph::new(input_lines).style(style).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(title),
-    );
+    let paragraph = Paragraph::new(layout.lines)
+        .style(style)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(title),
+        )
+        .scroll((start as u16, 0));
 
     f.render_widget(paragraph, area);
 
-    // Position cursor (if not running)
+    // Position cursor (if not running): the layout already resolved which
+    // wrapped row/col the cursor byte lands on.
     if !is_running {
-        // Calculate cursor position in the input area
-        let input_text = state.input.text();
-        let cursor_byte = state.input.cursor();
+        let cursor_x = area.x + 1 + layout.cursor_col as u16;
+        let cursor_y = area.y + 1 + (layout.cursor_row - start) as u16;
 
-        let cursor_line = input_text[..cursor_byte].lines().count();
-        let cursor_col = cursor_column(input_text, cursor_byte);
-
-        // The input box has a border, so add 1 to x and y
-        let cursor_x = area.x + 1 + cursor_col as u16;
-        let cursor_y = area.y + 1 + cursor_line as u16;
-
-        // Clamp to area
+        // Clamp to area as a safety net.
         let cursor_x = cursor_x.min(area.x + area.width.saturating_sub(2));
         let cursor_y = cursor_y.min(area.y + area.height.saturating_sub(2));
 
@@ -473,18 +480,65 @@ mod tests {
         s
     }
 
+    /// 输入框光标定位按显示宽度计算（CJK 占两列），且落在折行后的正确行。
     #[test]
-    fn cursor_column_counts_display_width_not_chars() {
-        // 3 ASCII chars: 6 (prompt) + 3.
-        assert_eq!(cursor_column("abc", 3), 9);
-        // "输" is one char but two columns: cursor after it sits at 6 + 2.
-        assert_eq!(cursor_column("输", 3), 8);
-        // "输入框" fully typed: 6 + 6.
-        assert_eq!(cursor_column("输入框", 9), 12);
-        // Mixed: 6 + 1 + 4 = 11.
-        assert_eq!(cursor_column("a输入", "a输入".len()), 11);
-        // Second line after a newline: prefix still applies.
-        assert_eq!(cursor_column("ab\n输c", "ab\n输c".len()), 6 + 3);
+    fn input_layout_counts_display_width_and_tracks_wrapped_cursor() {
+        let mut s = state_with(0);
+        s.input.insert_str("输入框");
+        let layout = s.input.layout(80);
+        assert_eq!(layout.cursor_col, 12, "6 prefix + 3 wide chars x2");
+        assert_eq!(layout.cursor_row, 0);
+
+        // 折行后光标在第二个折行行首（续行缩进 6 列）。
+        s.input.clear();
+        s.input.insert_str("word word word word");
+        let layout = s.input.layout(20); // text width 12 → "word word" + "word word"
+        assert_eq!(layout.lines.len(), 2);
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 6 + 9);
+    }
+
+    /// 长输入按词折行且输入框自动加高（pi 行为）：续行与提示符对齐，
+    /// 框底边框仍紧贴在 cwd 行上方。
+    #[test]
+    fn long_input_wraps_and_the_box_grows() {
+        let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.input.insert_str("word word word word word word word");
+        let rows = render_frame(&mut s, 26, 14);
+        // width 26 → text width 18: wraps into 3 rows, box height 5.
+        let cwd_row = rows.len() - 2;
+        assert!(rows[cwd_row].contains('/'), "{rows:?}");
+        assert!(rows[cwd_row - 1].contains('─'), "bottom border: {rows:?}");
+        let top_border = rows[..cwd_row - 1]
+            .iter()
+            .rposition(|r| r.contains('┌'))
+            .expect("box top border");
+        assert_eq!(cwd_row - 1 - top_border, 4, "box height 5: {rows:?}");
+        // 每个折行行都带前缀（首行 crab>，续行缩进对齐）。
+        let content: Vec<&String> = rows[top_border + 1..cwd_row - 1].iter().collect();
+        assert!(content[0].contains("crab> word"), "{rows:?}");
+        assert!(content[1].contains("      word"), "{rows:?}");
+    }
+
+    /// 输入超长时框高封顶在 MAX_INPUT_ROWS，光标行始终可见。
+    #[test]
+    fn long_input_is_capped_and_scrolls_with_the_cursor() {
+        let mut s = state_with(0);
+        s.input.insert_str(&"word ".repeat(60));
+        let rows = render_frame(&mut s, 40, 30);
+        let cwd_row = rows.len() - 2;
+        let top_border = rows[..cwd_row - 1]
+            .iter()
+            .rposition(|r| r.contains('┌'))
+            .expect("box top border");
+        assert_eq!(
+            cwd_row - 1 - top_border,
+            super::MAX_INPUT_ROWS + 1,
+            "box capped at MAX_INPUT_ROWS: {rows:?}"
+        );
+        // 光标在文本末尾：框内最后一行必须是内容尾部（内部滚动跟随光标）。
+        let last_content = &rows[cwd_row - 2];
+        assert!(last_content.contains("word"), "{last_content:?}");
     }
 
     #[test]
