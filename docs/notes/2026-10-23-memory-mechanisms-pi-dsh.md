@@ -4,6 +4,11 @@
 > docs + dist bundle 全文检索）；`deepseek-ai/deepseek-harness` @ `22ddee37`
 >（2026-10-23，shallow clone）。调研问题：两者有没有 memory 机制、什么形态，
 > 对 crab 的 lesson library（harness² 提案 P1）有什么参照。
+>
+> **后续**：截至 2026-11-03，Codex 和 Claude Code 都已有 first-party memory，
+> 见 [2026-11-03 Codex 与 Claude Code 调研](2026-11-03-memory-mechanisms-codex-claude-code.md)。
+> 本篇 TL;DR 中“只有 harness² 的 library 是 first-party 结构化记忆设计”的总括
+> 仅指当时调研的 pi/dsh 两个系统。
 
 ## TL;DR
 
