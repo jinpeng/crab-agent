@@ -22,7 +22,7 @@ tool loop:
 - **Local observability**: versioned session log, `crab trace` (span tree),
   `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-371 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+392 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -99,11 +99,11 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 
 | | |
 |---|---|
-| Lines of Rust | ~17,100 |
-| Tests | 365 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
+| Lines of Rust | ~18,200 |
+| Tests | 392 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
 | Binary (release) | ~12 MiB |
 | Cold start | ~5 ms `crab --version` (vs ~150 ms for pi 1.3.0, measured on the same machine) |
-| Commits | 205 |
+| Commits | 213 |
 | Commits authored by crab | 21 |
 
 ## Design
@@ -142,9 +142,22 @@ knob in the error. v0.4.3 makes the input box pi-like: a long prompt wraps
 on word boundaries (continuation rows indent under the prompt, wide chars
 never split), the box grows with the content up to 10 rows, and past that it
 scrolls internally with the cursor row always visible — previously a long
-line overflowed the single-row box and was clipped.
-Still deliberately future work: themes, session fork/branch, and a real extension
-API.
+line overflowed the single-row box and was clipped. Unreleased since v0.4.3:
+**lesson memory** (design: `docs/notes/2026-11-03-crab-memory-minimal-design.md`,
+built from surveys of pi/DeepSeek-harness, Codex/Claude Code, and eight open-source
+memory systems). Lessons are `Lesson` obs events appended to the session log
+(kind: project-bound *fact* vs portable *procedure*, evidence anchor, supersede
+for corrections — the log is never rewritten); `/reflect` distills them from the
+transcript with a write-discipline prompt, confirmed one by one in the existing
+confirm modal via `gate::ask` (no allow_all side effects), and every session
+start replays `.crab/sessions` into a budget-capped Lessons section of the system
+prompt (1500 tokens, newest first). Skill ads gained the same always-on budget
+discipline: truncated at 20 with an overflow hint. `--show-system-prompt` prints
+the exact built prompt, and `scripts/memory_acceptance.sh` automates the
+write → recall → layering → correction → isolation acceptance protocol (8/8).
+Still deliberately future work: themes, session fork/branch, a real extension
+API, and memory evolution (background extraction, cross-project lessons) pending
+dogfood.
 
 ---
 
