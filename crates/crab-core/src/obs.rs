@@ -40,6 +40,21 @@ pub enum CompactionStrategy {
     Summarize,
 }
 
+/// Lesson memory: one distilled, human-confirmed takeaway. The library is a
+/// derived view replayed from Lesson events across sessions
+/// (crate::lesson::resolve / load_library); the log itself is never
+/// rewritten — a correction appends a new event whose `supersedes`
+/// retires the earlier one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LessonKind {
+    /// Project-bound workspace fact. Injected only into same-project
+    /// sessions; wording must carry a project anchor (path/dir reference).
+    Fact,
+    /// Portable know-how, safe to reuse across projects.
+    Procedure,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "obs", rename_all = "snake_case")]
 pub enum ObsBody {
@@ -77,6 +92,17 @@ pub enum ObsBody {
         turns_affected: u32,
         /// `Some` iff strategy == Summarize. Inline, 单文件原则.
         summary: Option<String>,
+    },
+    /// A confirmed lesson from `/reflect` (design:
+    /// docs/notes/2026-11-03-crab-memory-minimal-design.md).
+    Lesson {
+        kind: LessonKind,
+        /// 一条一课；≤ 200 chars by convention (enforced at /reflect time).
+        text: String,
+        /// EntryId of the triggering entry in the SAME session.
+        evidence: crate::types::EntryId,
+        /// Some(older lesson's EntryId, same session) — this event retires it.
+        supersedes: Option<crate::types::EntryId>,
     },
 }
 
@@ -135,6 +161,27 @@ mod tests {
         };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["obs"], "turn_start");
+    }
+
+    #[test]
+    fn lesson_event_roundtrips() {
+        let e = ObsEvent {
+            run_id: 7,
+            ts: 99,
+            body: ObsBody::Lesson {
+                kind: LessonKind::Procedure,
+                text: "run cargo insta review after snapshot tests".into(),
+                evidence: 42,
+                supersedes: Some(13),
+            },
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["obs"], "lesson");
+        assert_eq!(v["kind"], "procedure");
+        assert_eq!(v["evidence"], 42);
+        assert_eq!(v["supersedes"], 13);
+        assert_eq!(serde_json::from_str::<ObsEvent>(&s).unwrap(), e);
     }
 
     #[test]

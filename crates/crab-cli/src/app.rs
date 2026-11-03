@@ -67,6 +67,11 @@ impl From<&crate::Cli> for AppConfig {
     }
 }
 
+/// always-on 预算纪律（P0-1，docs/notes/2026-10-23-harness2-application-proposal.md）：
+/// skill 广告是最贵的 prose（每个 token 都和输出预算竞争），超过阈值截断
+/// 尾部并提示剩余数量，而不是静默撑爆上下文。
+const MAX_SKILLS_ADVERTISED: usize = 20;
+
 pub fn build_system_prompt(
     cwd: &Path,
     extra: Option<String>,
@@ -83,12 +88,18 @@ pub fn build_system_prompt(
              read its SKILL.md at the given path with the read tool and follow it. \
              Bundled files (references/, scripts/, assets/) are relative to the skill's directory.\n",
         );
-        for s in skills {
+        for s in skills.iter().take(MAX_SKILLS_ADVERTISED) {
             sp.push_str(&format!(
                 "- {} — {} (at {})\n",
                 s.name,
                 s.description,
                 s.skill_md.display()
+            ));
+        }
+        if skills.len() > MAX_SKILLS_ADVERTISED {
+            sp.push_str(&format!(
+                "- … {} more skills under .agents/skills — ask to list them\n",
+                skills.len() - MAX_SKILLS_ADVERTISED
             ));
         }
         sp.pop(); // 去掉末行换行，保持段落整洁
@@ -422,6 +433,42 @@ args = ["-y", "server-brave-search"]
         let dir = tempfile::tempdir().unwrap();
         let sp = build_system_prompt(dir.path(), None, &[]);
         assert!(!sp.contains("# Skills"));
+    }
+
+    #[test]
+    fn skills_ads_truncated_with_overflow_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills: Vec<_> = (0..MAX_SKILLS_ADVERTISED + 3)
+            .map(|i| crab_core::skills::Skill {
+                name: format!("skill-{i:02}"),
+                description: format!("desc {i}"),
+                dir: dir.path().join(format!("s{i}")),
+                skill_md: dir.path().join(format!("s{i}/SKILL.md")),
+            })
+            .collect();
+        let sp = build_system_prompt(dir.path(), None, &skills);
+        // 前 20 个照常广告。
+        assert!(sp.contains("- skill-00 — desc 0"));
+        assert!(sp.contains("- skill-19 — desc 19"));
+        // 截断处提示剩余数量，而不是静默丢弃或撑爆。
+        assert!(sp.contains("- … 3 more skills under .agents/skills — ask to list them"));
+        assert!(!sp.contains("- skill-20"));
+    }
+
+    #[test]
+    fn skills_at_exactly_the_cap_are_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills: Vec<_> = (0..MAX_SKILLS_ADVERTISED)
+            .map(|i| crab_core::skills::Skill {
+                name: format!("skill-{i:02}"),
+                description: format!("desc {i}"),
+                dir: dir.path().join(format!("s{i}")),
+                skill_md: dir.path().join(format!("s{i}/SKILL.md")),
+            })
+            .collect();
+        let sp = build_system_prompt(dir.path(), None, &skills);
+        assert!(sp.contains("- skill-19 — desc 19"));
+        assert!(!sp.contains("more skills"));
     }
 
     #[test]

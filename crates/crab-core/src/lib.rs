@@ -2,6 +2,7 @@ pub mod agent;
 pub mod compact;
 pub mod config;
 pub mod gate;
+pub mod lesson;
 pub mod mcp;
 pub mod meter;
 pub mod obs;
