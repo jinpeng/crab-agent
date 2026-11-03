@@ -12,6 +12,66 @@ modified, commands run and their outcomes, pending tasks, and key technical \
 findings (error messages, APIs, formats). Drop pleasantries and restatements. \
 Under 800 words.\n\n[Conversation to summarize]";
 
+/// /reflect 蒸馏指令（design §产生）。写入纪律来自调研：跳过代码/Git/
+/// AGENTS.md 可推导的内容；fact 必须带项目锚；允许空手而归（KEEP_BASE）。
+const REFLECT_PROMPT: &str = "\
+Extract durable lessons from this coding-agent session transcript. \
+Output ONE lesson per line, strict format: KIND|text (no bullets, no prose).
+\
+KIND is FACT or PROCEDURE:
+\
+- FACT: a project-bound workspace fact (storage locations, conventions, \
+current state). The text must name the project directory or contain \
+'in this project'. Never something derivable from the code or git history.
+\
+- PROCEDURE: portable know-how reusable in other projects (workflows, \
+debug techniques, command sequences).
+\
+Rules: skip anything AGENTS.md or the code already states; skip transient \
+session state; each line under 200 characters; prefer NO output over filler.\n\n[Session transcript]";
+
+/// /reflect 转录上限（字符）：超长会话取尾部，头部标注截断。
+const REFLECT_TRANSCRIPT_CAP: usize = 20_000;
+
+/// 会话轨迹的 /reflect 视角：文本块全文，工具调用只留名字，工具结果截到
+/// 200 字符。超长取尾部（最近的工作最可能产出 lesson），头部标注截断。
+fn reflect_transcript(history: &[Message]) -> String {
+    let mut out = String::new();
+    for m in history {
+        let role = match m.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        for b in &m.content {
+            match b {
+                ContentBlock::Text { text } => {
+                    out.push_str(&format!("{role}: {text}\n"));
+                }
+                ContentBlock::ToolUse { name, .. } => {
+                    out.push_str(&format!("{role}: [called tool {name}]\n"));
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    let snippet: String = content.chars().take(200).collect();
+                    out.push_str(&format!("{role}: [tool result: {snippet}]\n"));
+                }
+            }
+        }
+    }
+    if out.len() > REFLECT_TRANSCRIPT_CAP {
+        // 从头部按行丢弃到预算内（按行截不断 UTF-8），并标注丢了多少。
+        let mut lines: Vec<&str> = out.lines().collect();
+        let mut skipped = 0usize;
+        while out.len() > REFLECT_TRANSCRIPT_CAP && !lines.is_empty() {
+            skipped += lines.remove(0).len() + 1;
+        }
+        out = format!(
+            "[… {skipped} chars of earlier transcript omitted]\n{}",
+            lines.join("\n")
+        );
+    }
+    out
+}
+
 /// The result of one compaction pass (TUI notices; the event is authoritative).
 #[derive(Debug, PartialEq)]
 pub struct CompactReport {
@@ -177,6 +237,66 @@ impl Agent {
     /// 手动 /compact 入口：无视阈值，立即执行一次压缩（spec §4）。
     pub async fn compact_now(&mut self) -> CompactReport {
         self.run_compaction().await
+    }
+
+    /// /reflect 第一步：把会话轨迹发给 LLM 蒸馏 lesson 提议（纯提议，
+    /// 不落任何状态；人审与落盘是调用方的两步）。空轨迹 → 空列表。
+    pub async fn propose_lessons(
+        &self,
+    ) -> Result<Vec<(crate::obs::LessonKind, String)>, ProviderError> {
+        let transcript = reflect_transcript(&self.history);
+        if transcript.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let req = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("{REFLECT_PROMPT}\n{transcript}"),
+            }],
+        }];
+        let t = self.provider.complete(&req, &[], None).await?;
+        let text: String = t
+            .message
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(crate::lesson::parse_proposals(&text))
+    }
+
+    /// /reflect 第三步：把人确认的 lesson 追加进会话日志（obs only，永不出现在
+    /// 模型可见历史）。evidence 锚到日志里最近一条 Message——lesson 由
+    /// 截至目前的整段工作支撑。空会话（无 Message）→ None，不落无锚条目。
+    pub fn append_lesson(&mut self, kind: crate::obs::LessonKind, text: &str) -> Option<EntryId> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let evidence = self.session.entries().iter().rev().find_map(|e| match e {
+            SessionEntry::Message { id, .. } => Some(*id),
+            _ => None,
+        })?;
+        let event = crate::obs::ObsEvent {
+            run_id: self.next_run_id,
+            ts: crate::util::now_ms(),
+            body: crate::obs::ObsBody::Lesson {
+                kind,
+                text: text.to_string(),
+                evidence,
+                supersedes: None,
+            },
+        };
+        match self.session.append_obs(event) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                eprintln!("[crab] obs append failed: {e}");
+                None
+            }
+        }
     }
 
     fn compaction_due(&self) -> bool {
@@ -1009,6 +1129,170 @@ pub(crate) mod tests {
             assert!(v.iter().flat_map(|m| &m.content).any(|b| matches!(b,
                 crate::types::ContentBlock::ToolResult { content, .. } if content.contains("[shed:"))));
         }
+    }
+
+    #[tokio::test]
+    async fn propose_lessons_parses_stub_reply() {
+        struct ReflectStub;
+        #[async_trait::async_trait]
+        impl crate::provider::Provider for ReflectStub {
+            async fn complete(
+                &self,
+                _: &[Message],
+                _: &[serde_json::Value],
+                _: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
+            ) -> Result<AssistantTurn, ProviderError> {
+                Ok(AssistantTurn {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text {
+                            text: "PROCEDURE|run cargo insta review after snapshot tests\n\
+                                   FACT|sessions live under .crab/sessions\n\
+                                   junk line without kind"
+                                .into(),
+                        }],
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    interrupted: false,
+                    usage: None,
+                })
+            }
+            fn label(&self) -> &str {
+                "stub"
+            }
+            fn model(&self) -> &str {
+                "stub"
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = crate::session::Session::create(dir.path()).unwrap();
+        session
+            .append(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do work".into(),
+                }],
+            })
+            .unwrap();
+        let agent = Agent::new(
+            Box::new(ReflectStub),
+            ToolRegistry::new(),
+            session,
+            AgentConfig::default(),
+        );
+        let proposals = agent.propose_lessons().await.unwrap();
+        assert_eq!(
+            proposals,
+            vec![
+                (
+                    crate::obs::LessonKind::Procedure,
+                    "run cargo insta review after snapshot tests".to_string()
+                ),
+                (
+                    crate::obs::LessonKind::Fact,
+                    "sessions live under .crab/sessions".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_lessons_empty_transcript_skips_provider() {
+        struct Boom;
+        #[async_trait::async_trait]
+        impl crate::provider::Provider for Boom {
+            async fn complete(
+                &self,
+                _: &[Message],
+                _: &[serde_json::Value],
+                _: Option<&tokio::sync::broadcast::Sender<StreamEvent>>,
+            ) -> Result<AssistantTurn, ProviderError> {
+                panic!("provider must not be called for an empty transcript")
+            }
+            fn label(&self) -> &str {
+                "boom"
+            }
+            fn model(&self) -> &str {
+                "boom"
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let agent = Agent::new(
+            Box::new(Boom),
+            ToolRegistry::new(),
+            session,
+            AgentConfig::default(),
+        );
+        assert!(agent.propose_lessons().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn append_lesson_appends_obs_anchored_to_latest_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = crate::session::Session::create(dir.path()).unwrap();
+        session
+            .append(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+            })
+            .unwrap();
+        let last = session
+            .append(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "done".into(),
+                }],
+            })
+            .unwrap();
+        let mut agent = Agent::new(
+            Box::new(MockProvider::new(vec![])),
+            ToolRegistry::new(),
+            session,
+            AgentConfig::default(),
+        );
+        let id = agent
+            .append_lesson(
+                crate::obs::LessonKind::Fact,
+                "sessions live under .crab/sessions",
+            )
+            .unwrap();
+        match &agent
+            .session
+            .entries()
+            .iter()
+            .find(|e| e.id() == id)
+            .unwrap()
+        {
+            crate::session::SessionEntry::Obs { event, .. } => {
+                assert_eq!(
+                    event.body,
+                    crate::obs::ObsBody::Lesson {
+                        kind: crate::obs::LessonKind::Fact,
+                        text: "sessions live under .crab/sessions".into(),
+                        evidence: last,
+                        supersedes: None,
+                    }
+                );
+            }
+            other => panic!("expected obs entry, got {other:?}"),
+        }
+        // lesson 不进模型可见历史
+        assert_eq!(agent.history().len(), 2);
+    }
+
+    #[test]
+    fn append_lesson_without_messages_appends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::Session::create(dir.path()).unwrap();
+        let mut agent = Agent::new(
+            Box::new(MockProvider::new(vec![])),
+            ToolRegistry::new(),
+            session,
+            AgentConfig::default(),
+        );
+        assert_eq!(agent.append_lesson(crate::obs::LessonKind::Fact, "x"), None);
+        assert_eq!(agent.session.entries().len(), 1); // 只有 meta 行
     }
 
     #[tokio::test]

@@ -55,6 +55,15 @@ pub enum LessonKind {
     Procedure,
 }
 
+impl std::fmt::Display for LessonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LessonKind::Fact => "fact",
+            LessonKind::Procedure => "procedure",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "obs", rename_all = "snake_case")]
 pub enum ObsBody {

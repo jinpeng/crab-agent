@@ -297,6 +297,8 @@ enum UiCommand {
     SetModel(String),
     /// `/compact`: compact the conversation immediately.
     Compact,
+    /// `/reflect`: distill lessons from this session, human-confirmed.
+    Reflect,
     /// `/update`: self-update a managed install (async; result as a notice).
     Update,
 }
@@ -371,6 +373,45 @@ async fn handle_command(
                 let _ = ui_tx.send(UiEvent::Notice("nothing to compact".into()));
             }
             // 非零情况由 AgentEvent::Compacted 处理器统一通知
+            false
+        }
+        UiCommand::Reflect => {
+            match agent.propose_lessons().await {
+                Ok(proposals) if proposals.is_empty() => {
+                    let _ = ui_tx.send(UiEvent::Notice(
+                        "nothing to reflect on (empty transcript or no lessons proposed)".into(),
+                    ));
+                }
+                Ok(proposals) => {
+                    let total = proposals.len();
+                    let mut accepted = 0usize;
+                    let mut accept_rest = false;
+                    for (kind, text) in proposals {
+                        if !accept_rest {
+                            // gate.ask 不碰 allow_all 闩：[a]ll 在这里的意思是
+                            // "接受全部剩余提议"，绝不变成会话级自动放行。
+                            match gate.ask(Prompt {
+                                tool: "memory",
+                                summary: format!("remember this lesson? [{kind}] {text}"),
+                            }) {
+                                Decision::Allow => {}
+                                Decision::AllowAll => accept_rest = true,
+                                Decision::Deny => continue,
+                            }
+                        }
+                        if agent.append_lesson(kind, &text).is_some() {
+                            accepted += 1;
+                        }
+                    }
+                    let _ = ui_tx.send(UiEvent::Notice(format!(
+                        "remembered {accepted} lesson(s), skipped {}",
+                        total - accepted
+                    )));
+                }
+                Err(e) => {
+                    let _ = err_tx.send(UiEvent::Error(format!("/reflect failed: {e}")));
+                }
+            }
             false
         }
         UiCommand::Submit(_) => false, // handled by the caller
@@ -729,6 +770,9 @@ fn dispatch_slash(
         }
         state::SlashCommand::Compact => {
             let _ = cmd_tx.blocking_send(UiCommand::Compact);
+        }
+        state::SlashCommand::Reflect => {
+            let _ = cmd_tx.blocking_send(UiCommand::Reflect);
         }
         state::SlashCommand::Unknown(name) => {
             state.notice(format!(

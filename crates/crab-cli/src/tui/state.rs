@@ -236,6 +236,8 @@ pub enum SlashCommand {
     PickSkill,
     /// Compact the conversation now (`/compact`).
     Compact,
+    /// Distill lessons from this session, confirmed one by one (`/reflect`).
+    Reflect,
     /// Self-update a managed install (`/update`).
     Update,
     /// Unrecognized `/something`.
@@ -288,6 +290,11 @@ pub const SLASH_COMMANDS: &[SlashCmd] = &[
         names: &["compact"],
         desc: "compact the conversation now",
         completion: "/compact",
+    },
+    SlashCmd {
+        names: &["reflect"],
+        desc: "distill lessons from this session, confirmed one by one",
+        completion: "/reflect",
     },
 ];
 
@@ -350,6 +357,7 @@ pub fn parse_slash(text: &str) -> Option<SlashCommand> {
         "models" => SlashCommand::PickModel,
         "skills" => SlashCommand::PickSkill,
         "compact" => SlashCommand::Compact,
+        "reflect" => SlashCommand::Reflect,
         "update" => SlashCommand::Update,
         other if other.starts_with("skill:") => {
             let name = other["skill:".len()..].trim().to_string();
@@ -1600,6 +1608,7 @@ mod tests {
     fn parse_skills_opens_picker() {
         assert_eq!(parse_slash("/skills"), Some(SlashCommand::PickSkill));
         assert_eq!(parse_slash("/compact"), Some(SlashCommand::Compact));
+        assert_eq!(parse_slash("/reflect"), Some(SlashCommand::Reflect));
     }
 
     #[test]

@@ -12,6 +12,12 @@ use crate::session::{Session, SessionEntry};
 use crate::types::EntryId;
 use std::path::{Path, PathBuf};
 
+/// 一条一课的长度上限（/reflect 提议与注入共用，design §数据模型）。
+pub const MAX_LESSON_TEXT_CHARS: usize = 200;
+/// Lessons 注入段的 always-on 预算。tokens≈chars/4 估算（与 meter 的
+/// 字节折算同级的近似；design §注入定为 1500 tokens）。
+pub const LESSON_SECTION_BUDGET_CHARS: usize = 1500 * 4;
+
 /// A lesson that survives replay (not superseded by a later event).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveLesson {
@@ -84,6 +90,63 @@ pub fn load_library(dir: &Path) -> std::io::Result<Vec<LiveLesson>> {
     Ok(out)
 }
 
+/// Parse an LLM's /reflect reply into lesson proposals. Strict line format
+/// `FACT|text` / `PROCEDURE|text`（大小写不敏感）；超长、空文本、重复项
+/// 丢弃。解析失败返回空列表——为凑数硬造 lesson 比空手而归更糟
+/// （KEEP_BASE 纪律）。
+pub fn parse_proposals(text: &str) -> Vec<(LessonKind, String)> {
+    let mut out: Vec<(LessonKind, String)> = Vec::new();
+    for line in text.lines() {
+        let Some((kind, body)) = line.split_once('|') else {
+            continue;
+        };
+        let kind = match kind.trim().to_ascii_uppercase().as_str() {
+            "FACT" => LessonKind::Fact,
+            "PROCEDURE" => LessonKind::Procedure,
+            _ => continue,
+        };
+        let text = body.trim();
+        if text.is_empty() || text.chars().count() > MAX_LESSON_TEXT_CHARS {
+            continue;
+        }
+        if out.iter().any(|(_, t)| t == text) {
+            continue;
+        }
+        out.push((kind, text.to_string()));
+    }
+    out
+}
+
+/// Render the system-prompt Lessons section. `lessons` must be sorted
+/// newest-first（调用方负责，load_library 产出为日志序）；超预算截断
+/// 尾部并提示剩余条数，而不是静默丢弃或撑爆上下文（P0-1 纪律）。
+/// 空列表 → None（无该段）。
+pub fn render_section(lessons_newest_first: &[LiveLesson]) -> Option<String> {
+    if lessons_newest_first.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\n\n# Lessons (from previous sessions in this project)\n\
+         Each line is a distilled, human-confirmed lesson from a past session.\n",
+    );
+    let mut omitted = 0usize;
+    for l in lessons_newest_first {
+        let line = format!("- [{}] {}\n", l.kind, l.text);
+        if out.len() + line.len() > LESSON_SECTION_BUDGET_CHARS && out.lines().count() > 3 {
+            // 已至少有标题+一条 → 截断；第一条永远放行（再小也留个种子）。
+            omitted += 1;
+            continue;
+        }
+        out.push_str(&line);
+    }
+    if omitted > 0 {
+        out.push_str(&format!(
+            "- … {omitted} more lessons on disk (.crab/sessions) — run /reflect in a past session to revisit\n"
+        ));
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +166,69 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn parse_proposals_keeps_valid_lines_only() {
+        let text = "PROCEDURE|run cargo insta review after snapshot tests\nfact|sessions live under .crab/sessions\n\nNOT_A_KIND|skip me\nPROCEDURE|\nPROCEDURE|duplicate\nPROCEDURE|duplicate\n";
+        let got = parse_proposals(text);
+        assert_eq!(
+            got,
+            vec![
+                (
+                    LessonKind::Procedure,
+                    "run cargo insta review after snapshot tests".to_string()
+                ),
+                (
+                    LessonKind::Fact,
+                    "sessions live under .crab/sessions".to_string()
+                ),
+                (LessonKind::Procedure, "duplicate".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_proposals_drops_overlong_lessons() {
+        let long = "x".repeat(MAX_LESSON_TEXT_CHARS + 1);
+        let got = parse_proposals(&format!("FACT|{long}\nFACT|ok"));
+        assert_eq!(got, vec![(LessonKind::Fact, "ok".to_string())]);
+    }
+
+    fn live(text: &str) -> LiveLesson {
+        LiveLesson {
+            session: PathBuf::from("s.jsonl"),
+            id: 1,
+            kind: LessonKind::Fact,
+            text: text.into(),
+            evidence: 0,
+        }
+    }
+
+    #[test]
+    fn render_section_formats_newest_first() {
+        let lessons = vec![live("newest"), live("oldest")];
+        let section = render_section(&lessons).unwrap();
+        assert!(section.contains("# Lessons (from previous sessions in this project)"));
+        assert!(section.contains("- [fact] newest\n- [fact] oldest"));
+    }
+
+    #[test]
+    fn render_section_none_when_empty() {
+        assert_eq!(render_section(&[]), None);
+    }
+
+    #[test]
+    fn render_section_truncates_with_omitted_hint() {
+        // 每条 ~150 字符 × 50 条 ≈ 7.5k > 6k 预算，确保截断真的发生。
+        let lessons: Vec<_> = (0..50)
+            .map(|i| live(&format!("lesson-{i:02} {}", "pad".repeat(48))))
+            .collect();
+        let section = render_section(&lessons).unwrap();
+        // 预算内只出现头部若干条，尾部有剩余提示。
+        assert!(section.contains("lesson-00"));
+        assert!(!section.contains("lesson-49"));
+        assert!(section.contains("more lessons on disk"));
     }
 
     #[test]

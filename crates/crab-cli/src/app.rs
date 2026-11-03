@@ -125,6 +125,24 @@ pub fn latest_session(dir: &Path) -> Option<PathBuf> {
     files.pop()
 }
 
+/// 注入 Lessons 段：重放 `.crab/sessions` 全部会话的 Lesson 事件，最新在前，
+/// 超预算截断（P0-1 纪律）。库不可读只警告——记忆是增强，不是启动条件。
+fn with_lessons(system_prompt: String, cwd: &Path) -> String {
+    match crab_core::lesson::load_library(&sessions_dir(cwd)) {
+        Ok(mut lessons) => {
+            lessons.reverse(); // load_library 产出日志序 → 最新在前
+            match crab_core::lesson::render_section(&lessons) {
+                Some(section) => format!("{system_prompt}{section}"),
+                None => system_prompt,
+            }
+        }
+        Err(e) => {
+            eprintln!("[crab] lessons: load failed, injecting none: {e}");
+            system_prompt
+        }
+    }
+}
+
 /// Assemble a ready-to-run agent.
 ///
 /// The returned [`McpClient`]s are the live MCP children backing the MCP tools
@@ -142,7 +160,7 @@ pub async fn build_agent(
 ) -> Result<Startup> {
     let cwd = std::env::current_dir().context("cwd")?;
     let skills = crab_core::skills::discover(&cwd, &std::env::home_dir().unwrap_or_default());
-    let system_prompt = build_system_prompt(&cwd, cfg.system.clone(), &skills);
+    let system_prompt = with_lessons(build_system_prompt(&cwd, cfg.system.clone(), &skills), &cwd);
 
     // Loaded once: the provider resolves its credentials from it and the
     // `[mcp.*]` sections below decide which servers to start.
@@ -433,6 +451,32 @@ args = ["-y", "server-brave-search"]
         let dir = tempfile::tempdir().unwrap();
         let sp = build_system_prompt(dir.path(), None, &[]);
         assert!(!sp.contains("# Skills"));
+    }
+
+    #[test]
+    fn with_lessons_injects_replayed_lessons_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".crab").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for (name, text) in [("session-1.jsonl", "older"), ("session-2.jsonl", "newer")] {
+            let line = serde_json::json!({
+                "kind": "obs", "id": 1,
+                "event": {"run_id": 0, "ts": 1, "obs": "lesson",
+                          "kind": "fact", "text": text, "evidence": 0, "supersedes": null}
+            });
+            std::fs::write(sessions.join(name), format!("{line}\n")).unwrap();
+        }
+        let sp = with_lessons("BASE".to_string(), dir.path());
+        assert!(sp.starts_with("BASE\n\n# Lessons"));
+        // 最新在前：newer 的条目先出现。
+        assert!(sp.contains("- [fact] newer\n- [fact] older"));
+    }
+
+    #[test]
+    fn with_lessons_no_sessions_keeps_prompt_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = with_lessons("BASE".to_string(), dir.path());
+        assert_eq!(sp, "BASE");
     }
 
     #[test]

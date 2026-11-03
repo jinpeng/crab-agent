@@ -76,6 +76,16 @@ impl PermissionGate {
         self.allow_all.store(on, Ordering::SeqCst);
     }
 
+    /// 问一次，不碰 allow_all 闩。供非工具场景复用同一确认 UI（如 /reflect
+    /// 的逐条人审）：`AllowAll` 原样返回给调用方解释（如"接受全部剩余
+    /// 提议"），绝不把它变成会话级自动放行。
+    pub fn ask(&self, p: Prompt) -> Decision {
+        if self.yolo || self.allow_all.load(Ordering::SeqCst) {
+            return Decision::Allow;
+        }
+        (self.confirmer)(p)
+    }
+
     pub fn check(&self, p: Prompt) -> Result<(), ToolError> {
         if self.yolo || self.allow_all.load(Ordering::SeqCst) {
             return Ok(());
