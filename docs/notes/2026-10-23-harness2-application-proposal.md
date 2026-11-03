@@ -63,6 +63,10 @@ harness² 的 harnessing-level recursion 中，最便宜且对 crab 价值最大
 
 ### 3. `/reflect` 命令 + library 注入
 
+> **2026-11-03 收敛**：本节已细化为最小设计，见
+> [2026-11-03-crab-memory-minimal-design.md](2026-11-03-crab-memory-minimal-design.md)
+>（基于 pi/dsh、Codex/Claude Code、开源记忆系统三篇调研）。下文保留原始提案。
+
 - **产生**：会话中（或结束时）`/reflect` → agent 从本会话轨迹蒸馏 lessons
   → 人确认后 append `Lesson` 事件。人审是关键（对齐 crab 的 dogfood 哲学：
   机器提议、人接收）。
