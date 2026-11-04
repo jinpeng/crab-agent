@@ -706,6 +706,96 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
                 Err(e) => Some(err(e)),
             }
         }
+        "steer" => {
+            // mid-run 引导：agent 空闲则直接 run（同 prompt），否则排队到
+            // 当前 run 完成后自动续跑（与 TUI 的 mid-run 排队语义一致）。
+            let text = v["text"].as_str().unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                return Some(err("empty steer"));
+            }
+            let shared = shared.clone();
+            let busy = shared.state() == "running";
+            tokio::spawn(async move {
+                let ws = shared.active();
+                match shared.agent_for(&ws).await {
+                    Ok(agent) => {
+                        if busy {
+                            shared
+                                .publish(json!({"kind":"steer.queued","workspace":ws,
+                                    "text":"steer queued behind the running turn"}))
+                                .await;
+                            // 等 idle（简单轮询——run_state 由事件桥维护，
+                            // 事件驱动在这里是过度设计）。
+                            loop {
+                                if shared.state() == "idle" {
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            }
+                        }
+                        let mut agent = agent.lock().await;
+                        let _ = agent.run(text).await;
+                    }
+                    Err(e) => {
+                        shared.publish(json!({"kind":"error","text":e})).await;
+                    }
+                }
+            });
+            Some(json!({
+                "type":"response","ok":true,
+                "data":{"disposition": if busy { "queued" } else { "started" }}
+            }))
+        }
+        "compact" => {
+            let ws = shared.active();
+            match shared.agent_for(&ws).await {
+                Ok(agent) => {
+                    let report = agent.lock().await.compact_now().await;
+                    if report.turns_affected == 0 {
+                        Some(json!({"type":"response","ok":true,
+                            "data":{"note":"nothing to compact"}}))
+                    } else {
+                        Some(json!({"type":"response","ok":true,
+                            "data":{"strategy":format!("{:?}",report.strategy),
+                                    "turns":report.turns_affected}}))
+                    }
+                }
+                Err(e) => Some(err(e)),
+            }
+        }
+        "reflect" => {
+            let ws = shared.active();
+            match shared.agent_for(&ws).await {
+                Ok(agent) => {
+                    let mut agent = agent.lock().await;
+                    match agent.propose_lessons().await {
+                        Ok(proposals) if proposals.is_empty() => {
+                            Some(json!({"type":"response","ok":true,
+                                "data":{"note":"nothing to reflect on"}}))
+                        }
+                        Ok(proposals) => {
+                            // 远程版 /reflect：accept=all 全部接受（人审在
+                            // App 上是独立切片；现在先全收，notice 报数）。
+                            let total = proposals.len();
+                            let mut accepted = 0usize;
+                            for (kind, text) in proposals {
+                                if agent.append_lesson(kind, &text).is_some() {
+                                    accepted += 1;
+                                }
+                            }
+                            shared
+                                .publish(json!({"kind":"reflected","workspace":ws,
+                                    "accepted":accepted,"total":total}))
+                                .await;
+                            Some(json!({"type":"response","ok":true,
+                                "data":{"accepted":accepted,"total":total}}))
+                        }
+                        Err(e) => Some(err(format!("reflect failed: {e}"))),
+                    }
+                }
+                Err(e) => Some(err(e)),
+            }
+        }
         "approve" => {
             let id = v["confirm_id"].as_u64().unwrap_or(0);
             let decision = match v["decision"].as_str().unwrap_or("") {
@@ -811,7 +901,7 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
             }
         }
         _ => Some(err(format!(
-            "unknown command {ty:?} (supports: status, attach, prompt, abort, approve, workspace.list/add/switch, session.list/create)"
+            "unknown command {ty:?} (supports: status, attach, prompt, abort, approve, workspace.list/add/switch, session.list/create, steer, compact, reflect)"
         ))),
     }
 }
@@ -827,23 +917,38 @@ fn hostname() -> String {
         .unwrap_or_else(|| "crab-host".into())
 }
 
-/// `crab serve --pair`：打印配对信息（URL + 终端二维码占位）。
-/// P3 最小实现：URL + token + 文字指引。二维码的终端渲染需要
-/// 一个 QR 库——P3 不加依赖，先把 URL 打印清楚（手机浏览器手动输入或
-/// 从同一 tailnet 的桌面浏览器复制）。真 QR 是 P4 的依赖决策。
+/// `crab serve --pair`：打印配对 URL + 终端 QR 码。
+/// 二维码内容即 URL（含 token）——手机相机/浏览器扫码即达，token
+/// 随 URL 注入，PWA 存 localStorage 后主屏幕启动免重输。
 pub fn print_pair(host: &str, port: u16) -> Result<()> {
     let ip = parse_bind(host)?;
     let token = device_token()?;
     let url = format!("http://{ip}:{port}/?token={token}");
-    println!("pair this device with crab serve:");
-    println!();
-    println!("  url:   {url}");
-    println!();
-    println!("  open it in the phone browser on the same LAN/tailnet,");
-    println!("  then 'Add to Home Screen' for the app experience.");
-    println!();
-    println!("  the token is stored at ~/.crab/serve/token (0600).");
-    println!("  keep this URL private — it grants full control.");
+    println!("pair this device with crab serve:\n");
+    println!("  {url}\n");
+    // 终端 QR：Unicode 半块字符，两行字符一行点。
+    if let Ok(code) = qrcode::QrCode::new(url.as_bytes()) {
+        let w = code.width();
+        let data = code.into_colors();
+        for y in (0..w).step_by(2) {
+            let mut line = String::new();
+            for x in 0..w {
+                let top = data[y * w + x] == qrcode::Color::Dark;
+                let bot = y + 1 < w && data[(y + 1) * w + x] == qrcode::Color::Dark;
+                line.push(match (top, bot) {
+                    (true, true) => '█',
+                    (true, false) => '▀',
+                    (false, true) => '▄',
+                    (false, false) => ' ',
+                });
+            }
+            println!("  {line}");
+        }
+        println!();
+    }
+    println!("  scan with the phone camera on the same LAN/tailnet,");
+    println!("  then 'Add to Home Screen' for the app experience.\n");
+    println!("  token lives at ~/.crab/serve/token (0600). keep the URL private.");
     Ok(())
 }
 

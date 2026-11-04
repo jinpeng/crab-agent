@@ -22,7 +22,7 @@
   header select { background: #111418; color: #d7dce2; border: 1px solid #2c333d;
                   border-radius: 5px; padding: 4px 6px; font-size: 13px; max-width: 45vw; }
   header .spacer { flex: 1; }
-  main { padding: 8px 14px 84px; }
+  main { padding: 8px 14px 118px; }
   .ev { padding: 4px 0; border-bottom: 1px solid #1b2027; word-break: break-word; }
   .ev .k { color: #6f7887; font-size: 11px; margin-right: 8px; text-transform: uppercase; }
   .ev.text .k { color: #4caf7d; }
@@ -46,6 +46,11 @@
   form button { background: #2d6cdf; color: #fff; border: 0; padding: 10px 16px;
                 border-radius: 7px; font-size: 15px; }
   #abort { background: #7d3530; padding: 10px 12px; }
+  #toolbar { position: fixed; bottom: calc(60px + env(safe-area-inset-bottom));
+             left: 0; right: 0; display: flex; gap: 6px; padding: 6px 14px;
+             background: #171b21; border-top: 1px solid #262c35; overflow-x: auto; }
+  #toolbar button { background: #232a34; color: #aab4c0; border: 0; padding: 6px 10px;
+                    border-radius: 6px; font-size: 12px; white-space: nowrap; }
   #empty { color: #525a66; text-align: center; margin-top: 30vh; font-size: 14px; }
 </style>
 </head>
@@ -59,6 +64,10 @@
 </header>
 <main id="log"><div id="empty">waiting for activity…</div></main>
 <div id="confirms"></div>
+<div id="toolbar">
+  <button data-cmd="compact">compact</button>
+  <button data-cmd="reflect">reflect</button>
+</div>
 <form id="f">
   <button type="button" id="abort" title="abort">✕</button>
   <input id="in" placeholder="prompt or /command" autocomplete="off">
@@ -149,6 +158,8 @@ function onEvent(e, isReplay) {
     case 'confirm_req': showConfirm(e.confirm_id, e.tool, e.summary); break;
     case 'confirm_resolved': hideConfirm(e.confirm_id); break;
     case 'workspace.added': case 'workspace.switched': ws && ws.send(JSON.stringify({id:'w2',type:'workspace.list'})); break;
+    case 'steer.queued': add('run', e.text, 'steer'); break;
+    case 'reflected': add('run', `remembered ${e.accepted}/${e.total} lessons`, 'reflect'); break;
     case 'warn': case 'error': add('err', e.text || 'warning'); break;
   }
 }
@@ -207,12 +218,19 @@ document.getElementById('f').onsubmit = (ev) => {
   const inp = document.getElementById('in');
   const v = inp.value.trim();
   if (!v) return;
-  ws.send(JSON.stringify({id:'p'+(++reqSeq), type:'prompt', text:v}));
+  // 运行中输入自动变 steer（mid-run 引导），空闲则是新 prompt。
+  const type = runState === 'running' ? 'steer' : 'prompt';
+  ws.send(JSON.stringify({id:'p'+(++reqSeq), type, text:v}));
   inp.value = '';
 };
 document.getElementById('abort').onclick = () => {
   ws.send(JSON.stringify({id:'ab'+(++reqSeq), type:'abort'}));
 };
+document.querySelectorAll('#toolbar button').forEach((b) => {
+  b.onclick = () => {
+    ws.send(JSON.stringify({id:'t'+(++reqSeq), type: b.dataset.cmd}));
+  };
+});
 connect();
 </script>
 </body>
