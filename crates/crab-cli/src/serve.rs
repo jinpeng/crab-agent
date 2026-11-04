@@ -70,16 +70,20 @@ impl ConfirmHub {
 }
 
 struct Shared {
-    agent: Mutex<Agent>,
-    workspace: String,
+    /// 每个 workspace 一个 Agent（懒加载，Arc 共享引用）。
+    agents: Mutex<std::collections::HashMap<String, std::sync::Arc<Mutex<Agent>>>>,
+    /// 当前激活的 workspace（客户端 attach/prompt 的目标）。
+    active: std::sync::Mutex<String>,
     tx: broadcast::Sender<EventRec>,
     replay: Mutex<std::collections::VecDeque<EventRec>>,
     seq: std::sync::atomic::AtomicU64,
     run_state: std::sync::Mutex<&'static str>,
-    /// 待决 confirm 路由（TUI ConfirmBridge 的 ws 版）。
     confirms: ConfirmHub,
-    /// serve 管理的 workspace 白名单（P1 起持久化在 ~/.crab/serve/config.toml）。
     workspaces: std::sync::Mutex<Vec<String>>,
+    /// 重新装配 Agent 所需的最小集（Config 不可 Clone，存重建参数）。
+    config: crab_core::config::Config,
+    provider_name: Option<String>,
+    gate: PermissionGate,
 }
 
 impl Shared {
@@ -110,6 +114,97 @@ impl Shared {
     }
     fn state(&self) -> String {
         self.run_state.lock().unwrap().to_string()
+    }
+
+    /// 当前激活 workspace。
+    fn active(&self) -> String {
+        self.active.lock().unwrap().clone()
+    }
+
+    /// 切换激活 workspace（必须已注册）。返回新激活名。
+    /// 切换激活 workspace（必须已注册）。与 workspace.add 同款：先
+    /// canonicalize——macOS 上 /var → /private/var 的符号链接会让
+    /// 原名和注册名不一致。
+    fn set_active(&self, name: &str) -> Result<String, String> {
+        let canon = std::path::Path::new(name)
+            .canonicalize()
+            .map_err(|e| format!("cannot access {name}: {e}"))?
+            .display()
+            .to_string();
+        if !self.workspaces.lock().unwrap().iter().any(|w| w == &canon) {
+            return Err(format!("unknown workspace {canon:?} (run workspace.list)"));
+        }
+        *self.active.lock().unwrap() = canon.clone();
+        Ok(canon)
+    }
+
+    /// 懒加载 workspace 的 Agent（首次访问时装配，之后复用）。
+    /// 调用方持有 Arc<Mutex<Agent>>；事件桥由本函数在首次装配时挂好。
+    async fn agent_for(
+        self: &Arc<Self>,
+        workspace: &str,
+    ) -> Result<std::sync::Arc<Mutex<Agent>>, String> {
+        {
+            let map = self.agents.lock().await;
+            if let Some(a) = map.get(workspace) {
+                return Ok(a.clone());
+            }
+        }
+        let cwd = std::path::PathBuf::from(workspace);
+        let agent = assemble_agent(
+            &cwd,
+            &self.config,
+            self.provider_name.as_deref(),
+            &self.gate,
+            false,
+        )
+        .map_err(|e| format!("assemble agent for {workspace}: {e}"))?;
+        let agent = std::sync::Arc::new(Mutex::new(agent));
+        // 事件桥必须在返回前就挂好——否则装配后立刻 run() 的早期事件
+        //（TurnStarted）会在桥建立前发出，丢失。subscribe 在 spawn 之前
+        // 同步完成（broadcast 只发给已存在的接收者）。
+        let rx = agent.lock().await.subscribe();
+        self.attach_event_bridge(workspace, rx);
+        self.agents
+            .lock()
+            .await
+            .insert(workspace.to_string(), agent.clone());
+        Ok(agent)
+    }
+
+    /// 挂一个 Agent 的事件桥（agent_for 和 session.create 共用）。
+    /// receiver 在 spawn 之前拿到——绝不在 spawn 里 subscribe（竞态丢事件）。
+    fn attach_event_bridge(
+        self: &Arc<Self>,
+        workspace: &str,
+        mut rx: broadcast::Receiver<AgentEvent>,
+    ) {
+        let shared = self.clone();
+        let ws = workspace.to_string();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        match &ev {
+                            AgentEvent::TurnStarted { .. } => shared.set_state("running"),
+                            AgentEvent::Finished { .. } => shared.set_state("idle"),
+                            _ => {}
+                        }
+                        if let Some(mut j) = event_json(&ev) {
+                            j["workspace"] = json!(ws);
+                            shared.publish(j).await;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        shared
+                            .publish(json!({"kind":"warn","workspace":ws,
+                                "text":format!("event lag: dropped {n}")}))
+                            .await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     /// 远程审批的 Confirmer：阻塞（在 tool future 里被同步调用）等任意
@@ -379,19 +474,51 @@ fn event_json(ev: &AgentEvent) -> Option<Value> {
     })
 }
 
+/// 装配一个 workspace 的 Agent（与 TUI 同路径：skills/lessons/provider/工具。
+/// P0 起不挂 MCP——attach_mcp_servers 的子进程管理是独立切片）。
+fn assemble_agent(
+    cwd: &std::path::Path,
+    config: &crab_core::config::Config,
+    provider_name: Option<&str>,
+    gate: &PermissionGate,
+    new_session: bool,
+) -> Result<Agent> {
+    let skills = crab_core::skills::discover(cwd, &std::env::home_dir().unwrap_or_default());
+    let system_prompt =
+        crate::app::with_lessons(crate::app::build_system_prompt(cwd, None, &skills), cwd);
+    let (provider, resolved) = crate::app::resolve_provider(config, provider_name)?;
+    let tools = register_all(SessionState::default(), gate.clone());
+    let dir = cwd.join(".crab").join("sessions");
+    // new_session=true（session.create）强制开新文件；否则续最新（--continue 语义）。
+    let session = if new_session {
+        Session::create(&dir).context("create session")?
+    } else {
+        match crate::app::latest_session(&dir) {
+            Some(p) => Session::load(&p).with_context(|| format!("load {}", p.display()))?,
+            None => Session::create(&dir).context("create session")?,
+        }
+    };
+    Ok(Agent::new(
+        provider,
+        tools,
+        session,
+        AgentConfig {
+            system_prompt,
+            context_window: resolved.context_window,
+            auto_compact_threshold: config.auto_compact_threshold(),
+            compactions: Vec::new(),
+            mcp_allowlist: resolved.mcp_allowlist.clone(),
+        },
+    ))
+}
+
 pub async fn run(host: &str, port: u16) -> Result<()> {
     let ip = parse_bind(host)?;
     let token = Arc::new(device_token()?);
     let cwd = std::env::current_dir().context("cwd")?;
 
-    // 与 TUI 同一个 Agent 装配。P0 简化：不挂 MCP（attach_mcp_servers 的
-    // 子进程管理是独立切片）、gate=yolo（远程还没有审批通道，启动行明说）。
-    let skills = crab_core::skills::discover(&cwd, &std::env::home_dir().unwrap_or_default());
-    let system_prompt =
-        crate::app::with_lessons(crate::app::build_system_prompt(&cwd, None, &skills), &cwd);
     let config =
         crab_core::config::Config::load_from(None).map_err(|e| anyhow::anyhow!("config: {e}"))?;
-    let (provider, resolved) = crate::app::resolve_provider(&config, None)?;
     // gate 的 confirmer 要在 register_all 前就位，但它依赖 shared（事件
     // 广播），shared 又依赖 agent——循环。解法是**延迟注入**：gate 先拿
     // 一个转发闭包，shared 建好后把真正的 confirmer 填进去。注入前
@@ -407,24 +534,6 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
             }
         })
     });
-    let tools = register_all(SessionState::default(), gate.clone());
-    let dir = cwd.join(".crab").join("sessions");
-    let session = match crate::app::latest_session(&dir) {
-        Some(p) => Session::load(&p).with_context(|| format!("load {}", p.display()))?,
-        None => Session::create(&dir).context("create session")?,
-    };
-    let agent = Agent::new(
-        provider,
-        tools,
-        session,
-        AgentConfig {
-            system_prompt,
-            context_window: resolved.context_window,
-            auto_compact_threshold: config.auto_compact_threshold(),
-            compactions: Vec::new(),
-            mcp_allowlist: resolved.mcp_allowlist.clone(),
-        },
-    );
 
     // workspace registry：持久化的列表 + cwd（永远注册，去重）。
     let mut initial_ws = load_workspaces();
@@ -435,54 +544,27 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
     }
 
     let shared = Arc::new(Shared {
-        agent: Mutex::new(agent),
-        workspace: cwd_name,
+        agents: Mutex::new(std::collections::HashMap::new()),
+        active: std::sync::Mutex::new(cwd_name.clone()),
         tx: broadcast::channel(256).0,
         replay: Mutex::new(std::collections::VecDeque::new()),
         seq: std::sync::atomic::AtomicU64::new(0),
         run_state: std::sync::Mutex::new("idle"),
         confirms: ConfirmHub::new(),
         workspaces: std::sync::Mutex::new(initial_ws),
+        config,
+        provider_name: None,
+        gate,
     });
     // 注入真正的远程审批 confirmer（注入前一律 Deny——保守默认）。
     *late_confirmer.lock().unwrap() = Some(shared.confirmer());
-
-    // Agent 事件 → 协议事件（广播 + 回放缓冲）+ run_state 跟踪。
-    {
-        let shared = shared.clone();
-        let mut rx = shared.agent.lock().await.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) => {
-                        match &ev {
-                            AgentEvent::TurnStarted { .. } => shared.set_state("running"),
-                            AgentEvent::Finished { .. } => shared.set_state("idle"),
-                            _ => {}
-                        }
-                        if let Some(j) = event_json(&ev) {
-                            shared.publish(j).await;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        shared
-                            .publish(
-                                json!({"kind":"warn","text":format!("event lag: dropped {n}")}),
-                            )
-                            .await;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
 
     let addr = SocketAddr::new(ip, port);
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
     eprintln!("crab serve v{VERSION}");
-    eprintln!("  workspace: {}", shared.workspace);
+    eprintln!("  workspace: {}", shared.active());
     eprintln!("  url:       http://{addr}/?token={token}");
     eprintln!("  healthz:   http://{addr}/healthz");
     eprintln!("  note: P1 has an approval channel but no TLS yet — trusted LAN/tailnet only");
@@ -544,7 +626,7 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
             "data": {
                 "host": hostname(),
                 "version": VERSION,
-                "workspace": shared.workspace,
+                "workspace": shared.active(),
                 "state": {"run_state": shared.state()},
                 "note": "P1: approval channel live; no TLS yet (P2)",
             }
@@ -570,14 +652,37 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
             }
             let shared = shared.clone();
             tokio::spawn(async move {
-                let mut agent = shared.agent.lock().await;
-                let _ = agent.run(text).await;
+                let ws = shared.active();
+                if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                    eprintln!("[dbg] prompt: ws={ws}");
+                }
+                match shared.agent_for(&ws).await {
+                    Ok(agent) => {
+                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                            eprintln!("[dbg] prompt: agent ready, running");
+                        }
+                        let mut agent = agent.lock().await;
+                        let r = agent.run(text).await;
+                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                            eprintln!("[dbg] prompt: run done: {r:?}");
+                        }
+                    }
+                    Err(e) => {
+                        shared.publish(json!({"kind":"error","text":e})).await;
+                    }
+                }
             });
             Some(json!({"type":"response","ok":true,"data":{"disposition":"started"}}))
         }
         "abort" => {
-            shared.agent.lock().await.abort();
-            Some(json!({"type":"response","ok":true}))
+            let ws = shared.active();
+            match shared.agent_for(&ws).await {
+                Ok(agent) => {
+                    agent.lock().await.abort();
+                    Some(json!({"type":"response","ok":true}))
+                }
+                Err(e) => Some(err(e)),
+            }
         }
         "approve" => {
             let id = v["confirm_id"].as_u64().unwrap_or(0);
@@ -602,8 +707,76 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
         "workspace.list" => Some(json!({
             "type": "response", "ok": true,
             "data": {"workspaces": shared.workspace_names(),
-                     "active": shared.workspace}
+                     "active": shared.active()}
         })),
+        "workspace.switch" => {
+            let name = v["name"].as_str().unwrap_or("");
+            match shared.set_active(name) {
+                Ok(active) => {
+                    shared
+                        .publish(json!({"kind":"workspace.switched","workspace":active}))
+                        .await;
+                    Some(json!({"type":"response","ok":true,"data":{"active":active}}))
+                }
+                Err(e) => Some(err(e.to_string())),
+            }
+        }
+        "session.list" => {
+            // 当前激活 workspace 的 session 列表（按修改时间倒序，前 20）。
+            let dir = std::path::PathBuf::from(shared.active())
+                .join(".crab")
+                .join("sessions");
+            let mut items: Vec<(String, u64)> = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+                        .filter_map(|e| {
+                            let m = e.metadata().ok()?;
+                            Some((
+                                e.file_name().to_string_lossy().into_owned(),
+                                m.modified()
+                                    .ok()?
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .ok()?
+                                    .as_secs(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+            items.truncate(20);
+            let list: Vec<Value> = items
+                .into_iter()
+                .map(|(name, mtime)| json!({"file": name, "mtime": mtime}))
+                .collect();
+            Some(json!({"type":"response","ok":true,"data":{"sessions":list}}))
+        }
+        "session.create" => {
+            // 新 session = 丢弃当前 Agent 并让下次 agent_for 重建一个（指向
+            // 新文件）。简单可靠：直接换一个新 Agent（append-only 旧文件不动）。
+            let ws = shared.active();
+            let cwd = std::path::PathBuf::from(&ws);
+            match assemble_agent(
+                &cwd,
+                &shared.config,
+                shared.provider_name.as_deref(),
+                &shared.gate,
+                true,
+            ) {
+                Ok(new_agent) => {
+                    let agent = std::sync::Arc::new(Mutex::new(new_agent));
+                    let rx = agent.lock().await.subscribe();
+                    shared.attach_event_bridge(&ws, rx);
+                    shared.agents.lock().await.insert(ws.clone(), agent.clone());
+                    shared
+                        .publish(json!({"kind":"session.created","workspace":ws}))
+                        .await;
+                    Some(json!({"type":"response","ok":true}))
+                }
+                Err(e) => Some(err(e.to_string())),
+            }
+        }
         "workspace.add" => {
             let path = v["path"].as_str().unwrap_or("").to_string();
             match shared.workspace_add(path) {
@@ -616,7 +789,7 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
             }
         }
         _ => Some(err(format!(
-            "unknown command {ty:?} (supports: status, attach, prompt, abort, approve, workspace.list, workspace.add)"
+            "unknown command {ty:?} (supports: status, attach, prompt, abort, approve, workspace.list/add/switch, session.list/create)"
         ))),
     }
 }
