@@ -89,6 +89,10 @@ const dot = document.getElementById('dot');
 const wsSel = document.getElementById('ws');
 const confirmsEl = document.getElementById('confirms');
 let ws, seq = 0, activeWs = '', runState = 'idle', reqSeq = 100;
+// 拉取式架构：客户端自记 offset（localStorage）。serve 重启会重置 seq，
+// 所以还要记 boot_id——发现变了就重置 offset=0（防旧 offset 永远拉不到）。
+let offset = Number(localStorage.crabOffset || 0);
+let bootId = localStorage.crabBootId || '';
 const pendingConfirms = new Map();
 function dbgSet(s) { const d = document.getElementById('dbg'); if (d) d.textContent = s; }
 
@@ -114,28 +118,100 @@ function notify(title, body) {
   try { new Notification(title, { body, icon: 'icon.svg', tag: 'crab', renotify: false }); } catch (_) {}
 }
 
-function connect() {
-  const WS = `${proto}//${location.hostname}:${Number(location.port||443)+2}/ws?token=${encodeURIComponent(tok)}`;
-  ws = new WebSocket(WS);
-  ws.onopen = () => {
-    dot.className = 'dot on';
-    // 服务端在连接建立时主动推 status + workspace.list（见 serve.rs
-    // handle_ws 的 hello）——客户端只需 attach。
-    ws.send(JSON.stringify({id:'a1', type:'attach'}));
-  };
-  ws.onclose = () => {
-    dot.className = 'dot';
-    st.textContent = 'reconnecting…';
-    setTimeout(connect, 2000);
-  };
-  ws.onmessage = (m) => {
-    const r = JSON.parse(m.data);
-    // 调试：右上角显示最近收到的事件类型（诊断 confirm_req 是否到达手机）。
-    const dbg = document.getElementById('dbg');
-    if (dbg) dbg.textContent = (r.type === 'event' ? r.event.kind : r.type) + ' ' + (r.seq || '');
-    if (r.type === 'response') return onResp(r);
-    if (r.type === 'event') { seq = r.seq; return onEvent(r.event); }
-  };
+// POST /cmd：控制命令（prompt/approve/abort/...）。
+async function cmd(v) {
+  try {
+    const r = await fetch(`/cmd?token=${encodeURIComponent(tok)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(v),
+    });
+    return await r.json();
+  } catch (e) { add('err', 'cmd failed: ' + e); return null; }
+}
+
+// 长轮询拉取循环：after_id=offset，hold 30s 或新事件到达。断线自动重连。
+let pulling = false;
+async function pullLoop() {
+  if (pulling) return;
+  pulling = true;
+  dot.className = 'dot on';
+  for (;;) {
+    // 看门狗：Safari 后台/锁屏会永久挂起长 fetch——超过 timeout+缓冲
+    // 未返回就 abort 重试，否则循环卡死、confirm_req 永远拉不到（这就是
+    // "卡片要等刷新才出现"的根因）。
+    const ctl = new AbortController();
+    forceRepull = () => ctl.abort(); // 页面恢复可见时主动中断重拉
+    const watchdog = setTimeout(() => ctl.abort(), 35000);
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`/events?token=${encodeURIComponent(tok)}&after_id=${offset}&timeout=30`,
+        { signal: ctl.signal });
+      clearTimeout(watchdog);
+      if (!r.ok) { dot.className = 'dot'; st.textContent = 'http ' + r.status; await sleep(2000); continue; }
+      const d = await r.json();
+      const nEv = (d.events || []).length;
+      // 拉取时序打点：显示本次 fetch 耗时 + 拉到几个事件 + 当前 offset。
+      // 诊断"服务端毫秒级唤醒但手机 30s 才见"——看是 fetch 本身慢还是事件少。
+      dbgSet(`pull ${Date.now()-t0}ms +${nEv} @${offset}`);
+      dot.className = 'dot on';
+      // 自愈：客户端 offset 超过服务端高水位（serve 重启 seq 重置，或旧
+      // localStorage 残留）——直接跳到最新。这是幂等防线，不依赖 boot_id。
+      if (offset > d.high_watermark) {
+        offset = d.high_watermark;
+        localStorage.crabOffset = offset;
+        add('run', 'resynced to latest (offset reset)', 'sync');
+      }
+      // pending 审批快照（与 offset 无关）——重连即见未决审批。
+      if (d.pending_confirms) for (const p of d.pending_confirms) {
+        if (!pendingConfirms.has(p.id)) showConfirm(p.id, p.tool, p.summary);
+      }
+      for (const e of d.events || []) {
+        offset = Math.max(offset, e.id);
+        localStorage.crabOffset = offset;
+        onEvent(e.entry);
+      }
+      // 落后太多（>1000）则跳到最新并提示（Q10）。
+      if (d.high_watermark > offset + 1000) {
+        offset = d.high_watermark;
+        localStorage.crabOffset = offset;
+        add('run', `skipped to latest (lagged)`, 'sync');
+      }
+    } catch (e) {
+      clearTimeout(watchdog);
+      dot.className = 'dot'; st.textContent = 'reconnecting…';
+      // 诊断：显示 fetch 具体错误（AbortError=看门狗/恢复可见，TypeError=网络，
+      // 其他=意外）+ 距上次成功的时长——定位 confirm_req 那次 fetch 为何失败。
+      dbgSet(`pull ERR ${e.name || e} @${offset}`);
+      await sleep(1000); // abort/网络错——短等后重试（看门狗唤醒后尽快重拉）
+    }
+  }
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// 页面从后台/锁屏恢复时，强制中断当前 hold 的 fetch 立即重拉——Safari
+// 暂停 JS 期间错过的 confirm_req 靠这次重拉补上（不等 30s hold 自然超时）。
+let forceRepull = null;
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && forceRepull) forceRepull();
+});
+
+// 启动：先 attach 拿 boot_id（serve 重启检测），再进拉取循环。
+async function start() {
+  const r = await cmd({ id: 'a1', type: 'attach' });
+  if (r && r.data && r.data.boot_id !== undefined) {
+    const bid = String(r.data.boot_id);
+    if (bootId && bootId !== bid) {
+      // serve 重启了——seq 重置，旧 offset 失效，从 0 重新拉（近期 200 条）。
+      offset = 0;
+      localStorage.crabOffset = 0;
+      add('run', 'serve restarted, resynced from latest', 'sync');
+    }
+    bootId = bid;
+    localStorage.crabBootId = bid;
+  }
+  if (r) onResp(r);
+  const wl = await cmd({ id: 'w1', type: 'workspace.list' });
+  if (wl) onResp(wl);
+  pullLoop();
 }
 
 function onResp(r) {
@@ -147,9 +223,6 @@ function onResp(r) {
   }
   if (d.workspaces) renderWorkspaces(d.workspaces, d.active);
   if (d.active && !d.workspaces) { activeWs = d.active; syncWsSelect(); }
-  if (d.head_seq !== undefined) {
-    if (d.replay) for (const [s, e] of d.replay) { seq = s; onEvent(e, true); }
-  }
 }
 function onEvent(e, isReplay) {
   const wsname = e.workspace || '';
@@ -176,7 +249,7 @@ function onEvent(e, isReplay) {
       dbgSet('resolved ' + e.confirm_id);
       hideConfirm(e.confirm_id);
       break;
-    case 'workspace.added': case 'workspace.switched': ws && ws.send(JSON.stringify({id:'w2',type:'workspace.list'})); break;
+    case 'workspace.added': case 'workspace.switched': cmd({id:'w2',type:'workspace.list'}).then(r=>r&&onResp(r)); break;
     case 'steer.queued': add('run', e.text, 'steer'); break;
     case 'reflected': add('run', `remembered ${e.accepted}/${e.total} lessons`, 'reflect'); break;
     case 'warn': case 'error': add('err', e.text || 'warning'); break;
@@ -200,7 +273,7 @@ function syncWsSelect() {
 wsSel.onchange = () => {
   const target = wsSel.value;
   if (target && target !== activeWs) {
-    ws.send(JSON.stringify({id: 'sw' + (++reqSeq), type: 'workspace.switch', name: target}));
+    cmd({id: 'sw' + (++reqSeq), type: 'workspace.switch', name: target});
   }
 };
 
@@ -217,7 +290,7 @@ function showConfirm(id, tool, summary) {
     </div>`;
   card.querySelectorAll('button').forEach((b) => {
     b.onclick = () => {
-      ws.send(JSON.stringify({id:'ap'+id, type:'approve', confirm_id:id, decision:b.dataset.d}));
+      cmd({id:'ap'+id, type:'approve', confirm_id:id, decision:b.dataset.d});
       hideConfirm(id);
     };
   });
@@ -241,18 +314,18 @@ document.getElementById('f').onsubmit = (ev) => {
   if (!v) return;
   // 运行中输入自动变 steer（mid-run 引导），空闲则是新 prompt。
   const type = runState === 'running' ? 'steer' : 'prompt';
-  ws.send(JSON.stringify({id:'p'+(++reqSeq), type, text:v}));
+  cmd({id:'p'+(++reqSeq), type, text:v});
   inp.value = '';
 };
 document.getElementById('abort').onclick = () => {
-  ws.send(JSON.stringify({id:'ab'+(++reqSeq), type:'abort'}));
+  cmd({id:'ab'+(++reqSeq), type:'abort'});
 };
 document.querySelectorAll('#toolbar button').forEach((b) => {
   b.onclick = () => {
-    ws.send(JSON.stringify({id:'t'+(++reqSeq), type: b.dataset.cmd}));
+    cmd({id:'t'+(++reqSeq), type: b.dataset.cmd});
   };
 });
-connect();
+start();
 </script>
 </body>
 </html>

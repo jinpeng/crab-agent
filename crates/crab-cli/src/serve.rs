@@ -1,12 +1,15 @@
-//! `crab serve` — P0 remote control daemon (read-mostly).
+//! `crab serve` — remote control daemon (pull-based architecture).
 //!
-//! Design: docs/notes/2026-11-04-crab-mobile-app-design.md (P0 slice).
-//! One workspace (cwd), JSONL-over-WebSocket control channel, static PWA
-//! shell. The bind address must be a concrete local interface — never
-//! 0.0.0.0 — and a device token gates both the page and the socket.
+//! Design: docs/notes/2026-11-04-crab-serve-pull-architecture.md (当前架构).
+//! 拉取式：事件以统一 EntryId 追加进内存日志（真相源），客户端长轮询
+//! `GET /events?after_id=N` 拉取并自记 offset；控制命令走 `POST /cmd`。
+//! 服务端无状态于客户端进度——只保证日志写好了，客户端自己来拉。
+//! 审批：confirmer 写 confirm_req 进日志 + pending 快照，block_in_place
+//! 等待客户端决策（不阻塞 tokio worker）。
 //!
-//! P0 明确不做（后续切片）：TLS、配对 PIN、多 workspace、session 管理、
-//! approve 通道（gate=yolo，启动行明说）。
+//! 历史：曾是 JSONL-over-WebSocket 推送，真机验证暴露 ws 协议复杂性问题
+//!（手写 101 被拒、send 背压饿死 confirm_req、confirmer spawn 静默失败），
+//! 翻转为拉取后毫秒级可达。ws 代码已删（教训见 DESIGN.md）。
 
 use anyhow::{Context, Result, bail};
 use crab_core::agent::{Agent, AgentConfig, AgentEvent};
@@ -15,8 +18,6 @@ use crab_core::session::Session;
 use crab_core::state::SessionState;
 use crab_core::tools::register_all;
 use crab_core::types::ContentBlock;
-use futures::sink::SinkExt;
-use futures::stream::StreamExt;
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -71,6 +72,13 @@ impl ConfirmHub {
     }
 }
 
+/// 事件日志条目：拉取式架构的真相源。EntryId 单调连续（复用 seq）。
+#[derive(Clone, serde::Serialize)]
+struct LogEntry {
+    id: u64,
+    entry: serde_json::Value,
+}
+
 struct Shared {
     /// 每个 workspace 一个 Agent（懒加载，Arc 共享引用）。
     agents: Mutex<std::collections::HashMap<String, std::sync::Arc<Mutex<Agent>>>>,
@@ -82,6 +90,19 @@ struct Shared {
     run_state: std::sync::Mutex<&'static str>,
     confirms: ConfirmHub,
     workspaces: std::sync::Mutex<Vec<String>>,
+    /// 事件日志（拉取式真相源）：所有事件按 EntryId 追加，客户端长轮询拉取。
+    log: std::sync::Mutex<Vec<LogEntry>>,
+    /// 未决审批快照（attach/hello 携带，与 offset 无关）。
+    pending: std::sync::Mutex<Vec<serde_json::Value>>,
+    /// 新事件唤醒长轮询（log 追加时 notify）。
+    notify: tokio::sync::Notify,
+    /// per-agent FIFO prompt 队列（Q7）：key 是 agent 的 Arc 指针。
+    prompt_queues:
+        std::sync::Mutex<std::collections::HashMap<usize, std::collections::VecDeque<String>>>,
+    /// 正在跑 run 循环的 agent key（去重，防重复启动）。
+    queue_running: std::sync::Mutex<std::collections::HashSet<usize>>,
+    /// 服务端启动纪元（serve 重启变化，客户端据此重置 offset）。
+    boot_id: u64,
     /// 重新装配 Agent 所需的最小集（Config 不可 Clone，存重建参数）。
     config: crab_core::config::Config,
     provider_name: Option<String>,
@@ -111,10 +132,138 @@ impl Shared {
                 buf.pop_front();
             }
         }
+        // 拉取式架构：事件进日志（真相源）+ 唤醒长轮询。broadcast 保留
+        // 兼容存量 ws 客户端（迁移期间并存，验收后删）。
+        self.log.lock().unwrap().push(LogEntry {
+            id: rec.seq,
+            entry: rec.event.clone(),
+        });
+        // notify_one 存一个 permit（无 waiter 也保留），下一个 notified().await
+        // 立即消费——比 notify_waiters（无 waiter 即丢）可靠，配合 enable() 覆盖
+        // "检查日志 vs 进入 await"的窗口。多客户端各自持独立 Notify 才完美，但
+        // 单 Notify + notify_one + 3s 超时兜底已足够（丢 permit 最多 3s 重拉）。
+        self.notify.notify_one();
         if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-            eprintln!("[dbg] publish seq={} kind={}", rec.seq, rec.event["kind"]);
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            eprintln!(
+                "[dbg] publish seq={} kind={} @{}ms",
+                rec.seq,
+                rec.event["kind"],
+                ms % 100000
+            );
         }
         let _ = self.tx.send(rec); // 无订阅者不算错误
+    }
+
+    /// 长轮询拉取：返回 after_id 之后的事件。hold 到 timeout 或新事件。
+    /// 返回 (events, high_watermark)。
+    async fn pull(&self, after_id: u64, timeout_secs: u64) -> (Vec<LogEntry>, u64) {
+        // hold 上限 3s（不是客户端要求的 30s）——notify 在"客户端上一个 fetch
+        // 返回、下一个 fetch 还在路上"的窗口会丢（此时无长轮询在等）。与其
+        // 依赖 notify 精确唤醒（竞态难除），不如缩短 hold + 客户端快速重拉：
+        // 正常时 notify 毫秒级唤醒，丢时最多 3s 兜底（最坏延迟从 30s 降到 3s）。
+        let effective = timeout_secs.min(3);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(effective);
+        loop {
+            // 关键：先注册 notified 再检查日志——否则"检查日志"和"进入 await"
+            // 之间的窗口里 notify_waiters() 会丢失（它不缓冲），导致 confirm_req
+            // 到达时没被唤醒、长轮询干等 30s 超时（这就是卡片延迟 30s 的根因）。
+            // tokio 的 Notified::enable() 在创建时注册 interest，之后检查日志
+            // 发现已有新事件就直接返回，否则 await 时若事件已在窗口期到达，
+            // enable 时注册的 interest 能捕获到那次 notify。
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let log = self.log.lock().unwrap();
+                let hw = log.last().map(|e| e.id).unwrap_or(0);
+                if after_id < hw {
+                    let from = if after_id == 0 {
+                        log.len().saturating_sub(200)
+                    } else {
+                        log.iter()
+                            .position(|e| e.id > after_id)
+                            .unwrap_or(log.len())
+                    };
+                    let events: Vec<LogEntry> = log[from..].to_vec();
+                    return (events, hw);
+                }
+            }
+            // 无新事件——hold 到超时或被 notify 唤醒（enable 已注册，窗口期
+            // 的 notify 不会丢）。
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                let hw = self.log.lock().unwrap().last().map(|e| e.id).unwrap_or(0);
+                return (Vec::new(), hw);
+            }
+            let _ = tokio::time::timeout(deadline - now, notified).await;
+            if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                eprintln!("[dbg] pull woke (after_id={after_id}) @{}ms", ms % 100000);
+            }
+        }
+    }
+
+    /// 未决审批快照（attach/hello/events 响应携带）。
+    fn pending_confirms(&self) -> Vec<Value> {
+        self.pending.lock().unwrap().clone()
+    }
+    fn pending_add(&self, id: u64, tool: String, summary: String) {
+        self.pending
+            .lock()
+            .unwrap()
+            .push(json!({"id": id, "tool": tool, "summary": summary}));
+    }
+    fn pending_remove(&self, id: u64) {
+        self.pending.lock().unwrap().retain(|p| p["id"] != id);
+    }
+
+    /// per-agent FIFO 命令队列（Q7）：prompt 进队列，一个专门的 run 循环
+    /// 按序消费——保证日志顺序 = 客户端发送顺序（修 ws 时代 spawn 竞争
+    /// agent.lock() 的顺序不确定性）。队列存 Shared 级，run 循环按 agent 键。
+    fn enqueue_prompt(self: &Arc<Self>, agent: std::sync::Arc<Mutex<Agent>>, text: String) {
+        // 用 agent 的 Arc 指针做队列键（每个 agent 一个队列+一个 run 循环）。
+        let key = std::sync::Arc::as_ptr(&agent) as usize;
+        {
+            let mut q = self.prompt_queues.lock().unwrap();
+            q.entry(key).or_default().push_back(text);
+        }
+        // 若该 agent 的 run 循环不在跑，启动一个（幂等——running 集合去重）。
+        {
+            let mut running = self.queue_running.lock().unwrap();
+            if !running.insert(key) {
+                return; // 已有循环在跑，它会消费新入队的 prompt。
+            }
+        }
+        let shared = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let next = {
+                    let mut q = shared.prompt_queues.lock().unwrap();
+                    q.get_mut(&key).and_then(|q| q.pop_front())
+                };
+                match next {
+                    Some(text) => {
+                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                            eprintln!("[dbg] prompt: dequeued, running");
+                        }
+                        let mut agent = agent.lock().await;
+                        let r = agent.run(text).await;
+                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                            eprintln!("[dbg] prompt: run done: {r:?}");
+                        }
+                    }
+                    None => break, // 队列空——退出循环（下次入队会重启）。
+                }
+            }
+            shared.queue_running.lock().unwrap().remove(&key);
+        });
     }
 
     fn set_state(&self, s: &'static str) {
@@ -216,31 +365,40 @@ impl Shared {
     }
 
     /// 远程审批的 Confirmer：阻塞（在 tool future 里被同步调用）等任意
-    /// 已连接客户端的 approve。广播 confirm_req，首个到达的决策生效；
-    /// 超时（120s）或通道断开一律 Deny——宁可错杀不可放行。
+    /// 已连接客户端的 approve。写 confirm_req 进事件日志 + 登记 pending
+    /// 快照；首个到达的决策生效。Q12-b：去掉 120s 超时——活跃客户端
+    /// 长轮询毫秒级拉到，重连客户端由 hello 的 pending 快照补上；
+    /// 被 iOS 暂停的客户端催也没用。仅通道断开（serve 关闭）才 Deny。
     fn confirmer(self: &Arc<Self>) -> Confirmer {
         let shared = self.clone();
         Arc::new(move |prompt: Prompt| {
             let (tx, rx) = std::sync::mpsc::channel::<Decision>();
             let id = shared.confirms.insert(tx);
             // 不能 tokio::spawn——confirmer 是同步闭包（gate.check 在 tool
-            // execute 里同步调用），spawn 在无 runtime 上下文处 panic/静默失败，
-            // confirm_req 发不出去、channel 断开 → 立即 Deny（这就是写操作
-            // 直接被 permission denied、卡片不弹的根因）。
-            // broadcast::Sender::send 本身是同步的，直接同步发。
+            // execute 里同步调用），spawn 在无 runtime 上下文处 panic/静默失败。
+            // publish_sync 同步写事件日志 + 唤醒长轮询；同时登记 pending 快照
+            //（attach/hello 携带，与 offset 无关）。
+            shared.pending_add(id, prompt.tool.to_string(), prompt.summary.clone());
             shared.publish_sync(serde_json::json!({
                 "kind": "confirm_req",
                 "confirm_id": id,
                 "tool": prompt.tool,
                 "summary": prompt.summary,
             }));
-            // 阻塞等决策。占住当前 worker，但 crab 是 multi-thread runtime，
-            // 其他 worker 照常处理 ws 与 approve（与 TUI ConfirmBridge 同款
-            // 故意阻塞）。超时或断开一律 Deny——宁可错杀不可放行。
-            let decision = rx
-                .recv_timeout(std::time::Duration::from_secs(120))
-                .unwrap_or(Decision::Deny);
+            // 阻塞等决策。关键：block_in_place 告诉 tokio "本 worker 线程要做
+            // 阻塞 IO"，让它把该 worker 上其他 task（比如长轮询的 notified().await）
+            // 迁到别的 worker——否则 confirmer 的 recv 占住 worker，notify 的
+            // wakeup 排队无法被 poll，长轮询卡死（这就是 confirm_req 发布后
+            // 客户端 35s 才拉到的根因：turn_started 时 confirmer 未阻塞故毫秒级，
+            // confirm_req 一进 confirmer 阻塞，后续 wakeup 全卡）。
+            // block_in_place 需在 runtime 上下文；confirmer 在 tool future（runtime
+            // 内）被调用，安全。兜底：若不在 runtime（理论上不会），退化为裸 recv。
+            let decision = match tokio::task::block_in_place(|| rx.recv()) {
+                Ok(d) => d,
+                Err(_) => Decision::Deny, // 通道断开（serve 关闭）
+            };
             shared.confirms.remove(id);
+            shared.pending_remove(id);
             shared.publish_sync(serde_json::json!({
                 "kind": "confirm_resolved",
                 "confirm_id": id,
@@ -441,14 +599,97 @@ fn query_token(query: &str) -> Option<&str> {
     query.split('&').find_map(|kv| kv.strip_prefix("token="))
 }
 
-/// HTTP/WS 分流：tungstenite 的 accept_hdr_async 自己完成 101 握手，
-/// 非 WS 路径走最小 HTTP 响应。鉴权在握手回调里（ws）或路由里（页面）。
-async fn handle_conn<S>(mut stream: S, _shared: Arc<Shared>, token: Arc<String>) -> Result<()>
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    query.split('&').find_map(|kv| kv.strip_prefix(&prefix))
+}
+
+/// 读 HTTP body（Content-Length）。head 之后的 pre-read 可能已含部分 body。
+async fn read_body<S>(stream: &mut S, head: &str, pre: &[u8]) -> Result<Vec<u8>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    // 预读握手头（TLS 流无 peek）。/ws 分支的握手由独立 wss 端口承接（见
-    // run），这里 /ws 只回 426 指引——主端口不再处理 ws 升级。
+    let len: usize = head
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("content-length: ")
+                .or(l.strip_prefix("Content-Length: "))
+        })
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    let mut body = pre[..len.min(pre.len())].to_vec();
+    use tokio::io::AsyncReadExt;
+    while body.len() < len {
+        let mut tmp = [0u8; 4096];
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&tmp[..n]);
+    }
+    body.truncate(len);
+    Ok(body)
+}
+
+/// GET /events?after_id=N&timeout=S —— 长轮询拉取事件（拉取式架构核心）。
+/// hold 到有新事件或超时（默认 30s，上限 60s）。响应带 high_watermark
+/// 和 pending 审批快照（与 offset 无关的状态）。
+async fn handle_events<S>(
+    mut stream: S,
+    shared: Arc<Shared>,
+    query: &str,
+    _head: &str,
+    _pre: &[u8],
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let after_id: u64 = query_param(query, "after_id")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let timeout: u64 = query_param(query, "timeout")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let (events, hw) = shared.pull(after_id, timeout).await;
+    let body = json!({
+        "events": events,
+        "high_watermark": hw,
+        "pending_confirms": shared.pending_confirms(),
+    });
+    respond_http(&mut stream, 200, &body.to_string(), "application/json").await
+}
+
+/// POST /cmd —— 控制命令（prompt/approve/abort/workspace.switch/...）。
+/// 复用现有 dispatch 逻辑（去 ws 帧包装，直接 JSON in/out）。
+async fn handle_cmd<S>(mut stream: S, shared: Arc<Shared>, head: &str, pre: &[u8]) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let body = read_body(&mut stream, head, pre).await?;
+    let v: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+    let id = v
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or("_")
+        .to_string();
+    let resp = dispatch(v, &shared).await;
+    let body = match resp {
+        Some(mut r) => {
+            r["id"] = json!(id);
+            r
+        }
+        None => json!({"type":"response","id":id,"ok":true}),
+    };
+    respond_http(&mut stream, 200, &body.to_string(), "application/json").await
+}
+
+/// HTTPS 连接处理：读请求头，按路由分发（静态页 + 证书分发 + 拉取式
+/// /events + /cmd）。鉴权在路由里（token query）。
+async fn handle_conn<S>(mut stream: S, shared: Arc<Shared>, token: Arc<String>) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // 预读请求头（TLS 流无 peek）。
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
     let head_end = loop {
@@ -486,10 +727,9 @@ where
             stream.write_all(&bytes).await?;
             Ok(())
         }
-        // /ws 在独立 wss 端口（port+2）承接——主端口只做 https 页面。
-        // 预读已消耗握手头，这里无法回退给 tungstenite，故指引到正确端口。
-        ("/ws", true) => simple_http(stream, 426, "use wss on port+2").await,
-        ("/ws", false) => simple_http(stream, 403, "missing or bad token").await,
+        // 拉取式架构：/events 长轮询（读 body 前先看 method）。
+        ("/events", true) => handle_events(stream, shared, query, &head, &buf[head_end..]).await,
+        ("/cmd", true) => handle_cmd(stream, shared, &head, &buf[head_end..]).await,
         ("/", true) => {
             let html = INDEX_HTML.replace(
                 "const tok = new URLSearchParams(location.search).get('token') || localStorage.crabToken || '';",
@@ -536,11 +776,15 @@ where
         404 => "Not Found",
         _ => "Error",
     };
+    // 禁缓冲头（X-Accel-Buffering / Cache-Control）：iOS Safari 会缓冲长轮询
+    // 响应，延迟交给 JS——这就是 confirm_req 毫秒级到服务端、手机却 30s 后
+    // 才见的根因。显式禁缓冲让 Safari 收到即交付。
     let resp = format!(
-        "HTTP/1.1 {code} {reason}\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {code} {reason}\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nx-accel-buffering: no\r\ncache-control: no-cache, no-store\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(resp.as_bytes()).await?;
+    stream.flush().await?;
     Ok(())
 }
 
@@ -667,6 +911,15 @@ pub async fn run(host: &str, port: u16, http_cert: bool) -> Result<()> {
         active: std::sync::Mutex::new(cwd_name.clone()),
         tx: broadcast::channel(256).0,
         replay: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        log: std::sync::Mutex::new(Vec::new()),
+        pending: std::sync::Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+        prompt_queues: std::sync::Mutex::new(std::collections::HashMap::new()),
+        queue_running: std::sync::Mutex::new(std::collections::HashSet::new()),
+        boot_id: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
         seq: std::sync::atomic::AtomicU64::new(0),
         run_state: std::sync::Mutex::new("idle"),
         confirms: ConfirmHub::new(),
@@ -726,73 +979,6 @@ pub async fn run(host: &str, port: u16, http_cert: bool) -> Result<()> {
         });
     }
 
-    // WSS 独立端口（port+2）：tungstenite 的 accept_hdr_async 完整处理握手
-    //（不手写 101——iOS Safari 兼容性由库保证）。token 在握手回调里验。
-    {
-        let ws_addr = SocketAddr::new(ip, port + 2);
-        let acceptor2 = tls_acceptor.clone();
-        let shared2 = shared.clone();
-        let token2 = token.clone();
-        tokio::spawn(async move {
-            let Ok(l) = TcpListener::bind(ws_addr).await else {
-                eprintln!("[serve] wss bind {ws_addr} failed (in use?)");
-                return;
-            };
-            eprintln!("  wss:           wss://{ws_addr}/ws");
-            loop {
-                let Ok((stream, _)) = l.accept().await else {
-                    continue;
-                };
-                let acceptor = acceptor2.clone();
-                let shared = shared2.clone();
-                let token = token2.clone();
-                tokio::spawn(async move {
-                    let Ok(stream) = acceptor.accept(stream).await else {
-                        return;
-                    };
-                    let expected = token.clone();
-                    #[allow(clippy::result_large_err)]
-                    let cb =
-                        move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                              resp: tokio_tungstenite::tungstenite::handshake::server::Response|
-                              -> Result<
-                            _,
-                            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
-                        > {
-                            let uri = req.uri().to_string();
-                            let ok = uri
-                                .split('?')
-                                .nth(1)
-                                .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
-                                .is_some_and(|t| t == expected.as_str());
-                            if ok {
-                                Ok(resp)
-                            } else {
-                                Err(tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(
-                                Some("missing or bad token".into()),
-                            ))
-                            }
-                        };
-                    let ws = match tokio_tungstenite::accept_hdr_async(stream, cb).await {
-                        Ok(w) => w,
-                        Err(e) => {
-                            if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-                                eprintln!("[dbg] wss handshake rejected/failed: {e}");
-                            }
-                            return;
-                        }
-                    };
-                    if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-                        eprintln!("[dbg] wss client connected");
-                    }
-                    if let Err(e) = handle_ws(ws, shared).await {
-                        eprintln!("[serve] wss error: {e:#}");
-                    }
-                });
-            }
-        });
-    }
-
     eprintln!("crab serve v{VERSION}");
     eprintln!("  workspace:   {}", shared.active());
     eprintln!("  url:         https://{addr}/?token={token}");
@@ -820,80 +1006,6 @@ pub async fn run(host: &str, port: u16, http_cert: bool) -> Result<()> {
     }
 }
 
-// ---- WebSocket 会话 ----
-
-async fn handle_ws<S>(ws: tokio_tungstenite::WebSocketStream<S>, shared: Arc<Shared>) -> Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let (mut out, mut input) = ws.split();
-    // 连接建立即主动推 status + workspace.list——客户端 onopen 立刻发请求
-    // 在部分浏览器（手机 Safari）上会丢前几条，服务端推送消除这个竞态。
-    let hello = json!({
-        "type": "response", "id": "_hello", "ok": true,
-        "data": {
-            "host": hostname(),
-            "version": VERSION,
-            "workspace": shared.active(),
-            "state": {"run_state": shared.state()},
-        }
-    });
-    out.send(hello.to_string().into()).await?;
-    let wl = json!({
-        "type": "response", "id": "_workspaces", "ok": true,
-        "data": {"workspaces": shared.workspace_names(), "active": shared.active()}
-    });
-    out.send(wl.to_string().into()).await?;
-    let mut events = shared.tx.subscribe();
-    loop {
-        tokio::select! {
-            msg = input.next() => {
-                let Some(msg) = msg else { break };
-                let msg = msg?;
-                if !msg.is_text() { continue; }
-                let v: Value = serde_json::from_str(msg.to_text()?)?;
-                let id = v["id"].as_str().map(str::to_string);
-                if let Some(mut resp) = dispatch(v, &shared).await {
-                    if let Some(id) = id { resp["id"] = json!(id); }
-                    out.send(resp.to_string().into()).await?;
-                }
-            }
-            rec = events.recv() => {
-                match rec {
-                    Ok(rec) => {
-                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-                            eprintln!("[dbg] ws recv-event seq={} kind={}", rec.seq, rec.event["kind"]);
-                        }
-                        let frame = json!({"type":"event","seq":rec.seq,"event":rec.event});
-                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-                            eprintln!("[dbg] ws send seq={} kind={}", rec.seq, rec.event["kind"]);
-                        }
-                        // send（入队+flush）加超时：慢/暂停的客户端（手机 Safari
-                        // 后台节流）会让 flush 永久 pending，饿死后续事件
-                        //（confirm_req 被卡的根因）。超时则跳过本次 flush——帧已入
-                        // tungstenite 内部缓冲，连接恢复或下一帧时会补发；超时
-                        // 不视为失败，循环继续收下一事件。
-                        let send = out.send(frame.to_string().into());
-                        if let Err(e) = tokio::time::timeout(
-                            std::time::Duration::from_millis(200),
-                            send,
-                        )
-                        .await
-                        {
-                            eprintln!("[dbg] ws send TIMEOUT seq={} (client slow): {e}", rec.seq);
-                            // 继续循环——超时不是致命错误，广播缓冲里还有后续事件
-                            continue;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// 命令分发（P0 全集：status / attach / prompt / abort）。
 async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
     let ty = v["type"].as_str().unwrap_or("");
@@ -909,17 +1021,13 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
             }
         })),
         "attach" => {
-            let after = v["after_seq"].as_u64();
-            let buf = shared.replay.lock().unwrap();
-            let head_seq = buf.back().map(|r| r.seq).unwrap_or(0);
-            let replay: Vec<Value> = buf
-                .iter()
-                .filter(|r| after.is_none_or(|a| r.seq > a))
-                .map(|r| json!([r.seq, r.event]))
-                .collect();
+            // 拉取式架构：attach 返回 boot_id（服务端启动纪元）。客户端发现
+            // boot_id 变了（serve 重启、seq 从 1 重置）必须重置 offset=0——
+            // 否则旧 offset（比如 142）> 新 hw，永远拉不到（这就是"看不到
+            // 其它消息"的根因：客户端带着上次会话的 offset 连上了新 serve）。
             Some(json!({
                 "type": "response", "ok": true,
-                "data": {"head_seq": head_seq, "replay": replay}
+                "data": {"boot_id": shared.boot_id, "active": shared.active()}
             }))
         }
         "prompt" => {
@@ -927,29 +1035,17 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
             if text.is_empty() {
                 return Some(err("empty prompt"));
             }
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                let ws = shared.active();
-                if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-                    eprintln!("[dbg] prompt: ws={ws}");
+            // FIFO 串行（Q7）：不 spawn 竞争 agent.lock()，改为 per-agent
+            // 命令队列。prompt 进队列，立即返回 queued；专门的 run 循环
+            // 按队列顺序逐个执行——保证日志顺序 = 客户端发送顺序。
+            let ws = shared.active();
+            match shared.agent_for(&ws).await {
+                Ok(agent) => {
+                    shared.enqueue_prompt(agent, text);
+                    Some(json!({"type":"response","ok":true,"data":{"disposition":"queued"}}))
                 }
-                match shared.agent_for(&ws).await {
-                    Ok(agent) => {
-                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-                            eprintln!("[dbg] prompt: agent ready, running");
-                        }
-                        let mut agent = agent.lock().await;
-                        let r = agent.run(text).await;
-                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
-                            eprintln!("[dbg] prompt: run done: {r:?}");
-                        }
-                    }
-                    Err(e) => {
-                        shared.publish(json!({"kind":"error","text":e})).await;
-                    }
-                }
-            });
-            Some(json!({"type":"response","ok":true,"data":{"disposition":"started"}}))
+                Err(e) => Some(err(e)),
+            }
         }
         "abort" => {
             let ws = shared.active();

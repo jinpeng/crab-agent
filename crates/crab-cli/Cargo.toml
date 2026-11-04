@@ -25,7 +25,6 @@ scopeguard = "1.2.0"
 unicode-width = "0.2"
 rusqlite = { workspace = true, features = ["bundled"] }
 toml.workspace = true
-tokio-tungstenite = "0.28"
 include_dir = "0.7"
 qrcode = { version = "0.14", default-features = false }
 tokio-rustls = "0.26"

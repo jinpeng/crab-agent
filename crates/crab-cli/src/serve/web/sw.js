@@ -1,5 +1,5 @@
 // crab PWA service worker: cache the shell, never the live channel.
-const CACHE = 'crab-shell-v2-20261104-wss-port';
+const CACHE = 'crab-shell-v8-short-hold';
 const SHELL = ['./', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (e) => {
