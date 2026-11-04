@@ -59,6 +59,18 @@ crab serve devices                  # 列出/吊销已配对设备
 - **常驻模型**：单个 tokio 进程，内含 workspace registry（内存）+
   持久化存储（`~/.crab/serve/`：`config.toml`（工作区列表、device tokens
   哈希）、`serve-key.pem`（自签 Ed25519，首次启动生成））。
+- **单实例保证（serve.lock）**：启动先拿 `~/.crab/serve/serve.lock` 的 OS
+  级文件锁（flock/LockFile，内容含 pid+端口+启动时间）。拿不到锁时不报
+  错退出，而是转**客户端模式**：读锁内端口、GET /healthz 验证存活，然后
+  裸 `crab serve` 提示"already running (pid N, http://addr:port)"退出 0，
+  `pair`/`devices`/`workspace add` 等子命令**转发**给已运行实例执行。
+  锁随进程死亡自动释放（无陈旧锁问题）。这层保证同时挡住三类真实冲突：
+  ① 端口 bind 撞车；② 两个实例 attach 同一工作区——同一 session JSONL
+  被两个各自持有分叉内存态（history/compactions）的 Agent 双写，confirm
+  双弹；③ `config.toml` 与 audit.jsonl 的 lost-update。
+- **附带收益（后续可做）**：普通 `crab`（TUI）启动时查同一锁——若 cwd 已被
+  serve 管理，可直接 attach 到 serve 的 agent，根治"同一目录两个 crab"
+  的 --continue 撞车同源问题。
 - **Agent 管理**：每个工作区一个 `Agent`（懒加载：首次 attach 时
   `Session::create` 或 `--continue` 最近 session）。与 TUI 共享全部 core
   代码；**不挂 TUI 的 confirm bridge**——serve 直接拦截 gate 决策走
