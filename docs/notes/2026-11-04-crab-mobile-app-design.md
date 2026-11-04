@@ -71,6 +71,41 @@ crab serve devices                  # 列出/吊销已配对设备
 - **附带收益（后续可做）**：普通 `crab`（TUI）启动时查同一锁——若 cwd 已被
   serve 管理，可直接 attach 到 serve 的 agent，根治"同一目录两个 crab"
   的 --continue 撞车同源问题。
+
+### 同一目录：本地 TUI 与远程 App 能同时操作吗？
+
+**默认（v1）不能——因为 TUI 自建 Agent。** 现状：TUI 的 `build_agent` 直接
+`Session::create/load` + 自建 Agent；serve 在同一目录也有自己的 Agent。
+两个 Agent 对同一 session JSONL 双写、内存态分叉、confirm 双弹——与多开
+serve 同源的问题。锁只能防止双开，不能让两个独立 Agent 共存。
+
+**要支持同地双端，TUI 必须改成 attach 模式**（v1.5，改动比看起来小）：
+TUI 启动时查 serve.lock，若 cwd 已被 serve 管理，则**不 build_agent，而是
+走 ws 客户端 attach 到 serve 的 Agent**。需要动的只有三件事，全是现有
+通道的薄封装：
+
+1. **事件源**：TUI 的 `agent_rx = agent.subscribe()` 换成 ws 事件流（同一
+   `AgentEvent` 形状，反序列化即可）——TUI 渲染层零改动。
+2. **操作面**：`agent.run()`/`compact_now()`/`propose_lessons()` 换成
+   同名 RPC——TUI 的 UiCommand handler 已是这层抽象的受益者。
+3. **确认**：ConfirmBridge 的 sync channel 改成 RPC confirm_req——现有
+   bridge 本来就是"异步源 → sync channel"的适配器，远端只是另一种异步源。
+
+双端语义（协议已含，无需新设计）：
+- **并发观察**：多客户端 attach 天然支持（broadcast + 每客户端 seq 游标）。
+- **写互斥**：prompt/steer 按到达顺序串行（与 TUI mid-run 排队同语义）；
+  **同一 confirm 两个端同时弹**，先答者生效，后到者收 `confirm_resolved`。
+- **状态归属**：run_state、compaction、cost 全在 serve 的 Agent 上，TUI
+  只是又一个渲染器——所以 TUI 退出再进、手机锁屏再开，视图永远一致
+  （attach 重放/增量续传即恢复）。
+- **TUI 离线降级**：serve 不在时 TUI 回退到现在的自建模式（单机可用性
+  不受 serve 影响）；此时 serve 若启动，同一目录的 TUI 自建 Agent 与
+  serve 的冲突由目录锁（见下）挡在启动期。
+
+**目录锁**：除 serve.lock（用户级单实例）外，serve 管理的每个工作区
+持有一个 `<dir>/.crab/agent.lock`。TUI 自建模式启动时也拿这把锁——
+谁后到谁降级成 attach。这样"同一目录永远只有一个写 Agent"成为系统级
+不变量，而不是靠用户记得。
 - **Agent 管理**：每个工作区一个 `Agent`（懒加载：首次 attach 时
   `Session::create` 或 `--continue` 最近 session）。与 TUI 共享全部 core
   代码；**不挂 TUI 的 confirm bridge**——serve 直接拦截 gate 决策走
