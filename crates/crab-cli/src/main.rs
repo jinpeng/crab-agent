@@ -68,6 +68,10 @@ enum Commands {
         /// Port to listen on.
         #[arg(long, default_value = "7391")]
         port: u16,
+        /// Print a pairing URL + QR for the running/new serve and exit
+        /// (subcommand of serve, not a separate top-level one).
+        #[arg(long)]
+        pair: bool,
     },
 }
 
@@ -83,7 +87,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Commands::Metrics { days, json }) = &cli.command {
         return metrics::report(*days, *json);
     }
-    if let Some(Commands::Serve { host, port }) = &cli.command {
+    if let Some(Commands::Serve { host, port, pair }) = &cli.command {
+        if *pair {
+            return serve::print_pair(host, *port);
+        }
         return serve::run(host, *port).await;
     }
     if let Some(prompt) = cli.print.clone() {

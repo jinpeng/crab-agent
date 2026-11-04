@@ -4,94 +4,214 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#111418">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
 <title>crab</title>
 <style>
   :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
   body { margin: 0; font: 15px/1.5 -apple-system, system-ui, sans-serif;
-         background: #111418; color: #d7dce2; }
-  header { position: sticky; top: 0; background: #171b21; padding: 10px 14px;
-           border-bottom: 1px solid #262c35; font-size: 13px; color: #8b94a0;
-           display: flex; gap: 10px; align-items: center; }
-  header .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+         background: #111418; color: #d7dce2; overscroll-behavior: none; }
+  header { position: sticky; top: 0; z-index: 10; background: #171b21;
+           padding: 10px 14px; border-bottom: 1px solid #262c35;
+           display: flex; gap: 10px; align-items: center; font-size: 13px; color: #8b94a0; }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; flex: none; }
   header .dot.on { background: #4caf7d; }
-  main { padding: 10px 14px 80px; }
-  .ev { padding: 3px 0; border-bottom: 1px solid #1b2027; word-break: break-word; }
-  .ev .k { color: #6f7887; font-size: 12px; margin-right: 8px; }
+  header .ws-name { color: #d7dce2; font-weight: 600; }
+  header select { background: #111418; color: #d7dce2; border: 1px solid #2c333d;
+                  border-radius: 5px; padding: 4px 6px; font-size: 13px; max-width: 45vw; }
+  header .spacer { flex: 1; }
+  main { padding: 8px 14px 84px; }
+  .ev { padding: 4px 0; border-bottom: 1px solid #1b2027; word-break: break-word; }
+  .ev .k { color: #6f7887; font-size: 11px; margin-right: 8px; text-transform: uppercase; }
+  .ev.text .k { color: #4caf7d; }
+  .ev.run .k { color: #5b9bd5; }
+  .ev.tool .k { color: #c9a227; }
+  .ev.err, .ev.error .k { color: #d5635b; }
+  .confirm-card { position: sticky; bottom: 76px; margin: 8px 0; padding: 12px;
+                  background: #1d232c; border: 1px solid #c9a227; border-radius: 10px;
+                  box-shadow: 0 4px 24px rgba(0,0,0,.5); z-index: 20; }
+  .confirm-card .sum { font-size: 14px; margin-bottom: 10px; word-break: break-all; }
+  .confirm-card .row { display: flex; gap: 8px; }
+  .confirm-card button { flex: 1; padding: 10px; border-radius: 7px; border: 0; font-size: 15px; }
+  .btn-y { background: #2f7d4f; color: #fff; }
+  .btn-n { background: #7d3530; color: #fff; }
+  .btn-a { background: #6b5b1f; color: #fff; }
   form { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: 8px;
-         padding: 10px 14px; background: #171b21; border-top: 1px solid #262c35; }
+         padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+         background: #171b21; border-top: 1px solid #262c35; }
   input { flex: 1; background: #111418; border: 1px solid #2c333d; color: #d7dce2;
-          padding: 9px 10px; border-radius: 6px; font-size: 15px; }
-  button { background: #2d6cdf; color: #fff; border: 0; padding: 9px 14px;
-           border-radius: 6px; font-size: 15px; }
+          padding: 10px; border-radius: 7px; font-size: 16px; }
+  form button { background: #2d6cdf; color: #fff; border: 0; padding: 10px 16px;
+                border-radius: 7px; font-size: 15px; }
+  #abort { background: #7d3530; padding: 10px 12px; }
+  #empty { color: #525a66; text-align: center; margin-top: 30vh; font-size: 14px; }
 </style>
 </head>
 <body>
-<header><span class="dot" id="dot"></span><span id="status">connecting…</span></header>
-<main id="log"></main>
-<form id="f"><input id="in" placeholder="prompt" autocomplete="off"><button>send</button></form>
+<header>
+  <span class="dot" id="dot"></span>
+  <select id="ws" title="workspace"></select>
+  <span id="st">connecting…</span>
+  <span class="spacer"></span>
+  <span id="ctx"></span>
+</header>
+<main id="log"><div id="empty">waiting for activity…</div></main>
+<div id="confirms"></div>
+<form id="f">
+  <button type="button" id="abort" title="abort">✕</button>
+  <input id="in" placeholder="prompt or /command" autocomplete="off">
+  <button>send</button>
+</form>
 <script>
-const tok = new URLSearchParams(location.search).get('token') || '';
+const tok = new URLSearchParams(location.search).get('token') || localStorage.crabToken || '';
+if (tok) localStorage.crabToken = tok;
 const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const log = document.getElementById('log');
-const statusEl = document.getElementById('status');
+const empty = document.getElementById('empty');
+const st = document.getElementById('st');
+const ctx = document.getElementById('ctx');
 const dot = document.getElementById('dot');
-let ws, seq = 0;
+const wsSel = document.getElementById('ws');
+const confirmsEl = document.getElementById('confirms');
+let ws, seq = 0, activeWs = '', runState = 'idle', reqSeq = 100;
+const pendingConfirms = new Map();
 
-function add(kind, text) {
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('Notification' in window && Notification.permission === 'default') {
+  // Ask lazily on first user interaction to avoid the cold prompt.
+  document.body.addEventListener('click', () => Notification.requestPermission(), { once: true });
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function add(kind, text, tool) {
+  empty.style.display = 'none';
   const d = document.createElement('div');
-  d.className = 'ev';
-  d.innerHTML = `<span class="k">${kind}</span>${text.replace(/</g,'&lt;')}`;
+  d.className = 'ev ' + kind;
+  d.innerHTML = `<span class="k">${tool || kind}</span>${esc(text)}`;
   log.appendChild(d);
-  window.scrollTo(0, document.body.scrollHeight);
+  window.scrollTo({ top: document.body.scrollHeight });
+  // 后台且有运行活动时，favicon 标题提醒（无需推送服务）。
+  if (document.hidden && (kind === 'text' || kind === 'run')) notify('crab', text.slice(0, 80));
+}
+function notify(title, body) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try { new Notification(title, { body, icon: 'icon.svg', tag: 'crab', renotify: false }); } catch (_) {}
 }
 
 function connect() {
   ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(tok)}`);
   ws.onopen = () => {
-    statusEl.textContent = 'connected';
     dot.className = 'dot on';
-    ws.send(JSON.stringify({id:'1', type:'status'}));
-    ws.send(JSON.stringify({id:'2', type:'attach'}));
+    ws.send(JSON.stringify({id:'s1', type:'status'}));
+    ws.send(JSON.stringify({id:'w1', type:'workspace.list'}));
+    ws.send(JSON.stringify({id:'a1', type:'attach'}));
   };
   ws.onclose = () => {
-    statusEl.textContent = 'disconnected — retrying in 2s';
     dot.className = 'dot';
+    st.textContent = 'reconnecting…';
     setTimeout(connect, 2000);
   };
   ws.onmessage = (m) => {
     const r = JSON.parse(m.data);
-    if (r.type === 'response' && r.ok && r.data) {
-      if (r.data.state) statusEl.textContent =
-        `${r.data.host} · crab ${r.data.version} · ${r.data.workspace} · ${r.data.state.run_state}`;
-      if (r.data.head_seq !== undefined) {
-        statusEl.textContent += ` · seq ${r.data.head_seq}`;
-        if (r.data.replay) for (const [s, e] of r.data.replay) show(s, e);
-        seq = r.data.head_seq;
-      }
-    } else if (r.type === 'event') {
-      show(r.seq, r.event);
-      seq = r.seq;
-    } else if (r.type === 'response' && !r.ok) {
-      add('err', r.error || 'unknown error');
-    }
+    if (r.type === 'response') return onResp(r);
+    if (r.type === 'event') { seq = r.seq; return onEvent(r.event); }
   };
 }
 
-function show(s, e) {
-  if (e.kind === 'text_delta') add('text', e.text);
-  else if (e.kind === 'turn_started') add('run', `turn ${e.turn}`);
-  else if (e.kind === 'finished') add('done', String(e.reason));
-  else if (e.kind === 'tool_call_started') add('tool', e.name);
-  else if (e.kind === 'tool_call_finished') add('tool', e.is_error ? '✗ error' : '✓');
-  else add('ev', e.kind);
+function onResp(r) {
+  if (!r.ok) return add('err', r.error || 'error');
+  const d = r.data || {};
+  if (d.state) {
+    st.textContent = `${d.host} · ${d.state.run_state}`;
+    runState = d.state.run_state;
+  }
+  if (d.workspaces) renderWorkspaces(d.workspaces, d.active);
+  if (d.active && !d.workspaces) { activeWs = d.active; syncWsSelect(); }
+  if (d.head_seq !== undefined) {
+    if (d.replay) for (const [s, e] of d.replay) { seq = s; onEvent(e, true); }
+  }
+}
+function onEvent(e, isReplay) {
+  const wsname = e.workspace || '';
+  if (wsname && activeWs && wsname !== activeWs && e.kind !== 'confirm_req') return; // 只看激活
+  switch (e.kind) {
+    case 'turn_started': runState = 'running'; st.textContent = 'running'; add('run', `turn ${e.turn}`); break;
+    case 'finished': runState = 'idle'; st.textContent = 'idle'; add('done', e.reason);
+      if (document.hidden) notify('crab done', 'agent finished'); break;
+    case 'text_delta': add('text', e.text); break;
+    case 'assistant_message': if (e.text) add('text', e.text); break;
+    case 'tool_call_started': add('tool', e.name, 'tool'); break;
+    case 'tool_call_finished': add('tool', e.is_error ? '✗ error' : '✓ done', 'tool'); break;
+    case 'usage': ctx.textContent = `↑${e.prompt} ↓${e.completion}`; break;
+    case 'compacted': add('run', `compacted ${e.turns} turns`, 'compact'); break;
+    case 'confirm_req': showConfirm(e.confirm_id, e.tool, e.summary); break;
+    case 'confirm_resolved': hideConfirm(e.confirm_id); break;
+    case 'workspace.added': case 'workspace.switched': ws && ws.send(JSON.stringify({id:'w2',type:'workspace.list'})); break;
+    case 'warn': case 'error': add('err', e.text || 'warning'); break;
+  }
 }
 
+function renderWorkspaces(list, active) {
+  activeWs = active || activeWs;
+  wsSel.innerHTML = '';
+  for (const w of list) {
+    const o = document.createElement('option');
+    o.value = w; o.textContent = w.split('/').slice(-2).join('/');
+    o.title = w;
+    wsSel.appendChild(o);
+  }
+  syncWsSelect();
+}
+function syncWsSelect() {
+  for (const o of wsSel.options) o.selected = (o.value === activeWs);
+}
+wsSel.onchange = () => {
+  const target = wsSel.value;
+  if (target && target !== activeWs) {
+    ws.send(JSON.stringify({id: 'sw' + (++reqSeq), type: 'workspace.switch', name: target}));
+  }
+};
+
+// ---- approvals ----
+function showConfirm(id, tool, summary) {
+  if (pendingConfirms.has(id)) return;
+  const card = document.createElement('div');
+  card.className = 'confirm-card';
+  card.innerHTML = `<div class="sum"><b>${esc(tool)}</b> — ${esc(summary)}</div>
+    <div class="row">
+      <button class="btn-y" data-d="allow">allow</button>
+      <button class="btn-n" data-d="deny">deny</button>
+      <button class="btn-a" data-d="allow_all">all</button>
+    </div>`;
+  card.querySelectorAll('button').forEach((b) => {
+    b.onclick = () => {
+      ws.send(JSON.stringify({id:'ap'+id, type:'approve', confirm_id:id, decision:b.dataset.d}));
+      hideConfirm(id);
+    };
+  });
+  pendingConfirms.set(id, card);
+  confirmsEl.appendChild(card);
+  if (navigator.vibrate) navigator.vibrate([30, 40, 30]);
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function hideConfirm(id) {
+  const c = pendingConfirms.get(id);
+  if (c) { c.remove(); pendingConfirms.delete(id); }
+}
+
+// ---- input ----
 document.getElementById('f').onsubmit = (ev) => {
   ev.preventDefault();
-  const v = document.getElementById('in').value.trim();
+  const inp = document.getElementById('in');
+  const v = inp.value.trim();
   if (!v) return;
-  ws.send(JSON.stringify({id:String(++seq+1000), type:'prompt', text:v}));
-  document.getElementById('in').value = '';
+  ws.send(JSON.stringify({id:'p'+(++reqSeq), type:'prompt', text:v}));
+  inp.value = '';
+};
+document.getElementById('abort').onclick = () => {
+  ws.send(JSON.stringify({id:'ab'+(++reqSeq), type:'abort'}));
 };
 connect();
 </script>

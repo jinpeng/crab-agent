@@ -26,6 +26,9 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const INDEX_HTML: &str = include_str!("serve/web/index.html");
+const MANIFEST: &str = include_str!("serve/web/manifest.webmanifest");
+const SW_JS: &str = include_str!("serve/web/sw.js");
+const ICON_SVG: &str = include_str!("serve/web/icon.svg");
 /// 事件缓冲：断线重连 attach 时最多回放这么多条。
 const REPLAY_CAP: usize = 1000;
 
@@ -398,17 +401,37 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>, token: Arc<String>)
         ("/ws", false) => simple_http(stream, 403, "missing or bad token").await,
         ("/", true) => {
             let html = INDEX_HTML.replace(
-                "const tok = new URLSearchParams(location.search).get('token') || '';",
-                &format!("const tok = '{token}';"),
+                "const tok = new URLSearchParams(location.search).get('token') || localStorage.crabToken || '';",
+                &format!("const tok = '{token}'; localStorage.crabToken = '{token}';"),
             );
             simple_http(stream, 200, &html).await
         }
+        ("/manifest.webmanifest", _) => {
+            simple_http(stream, 200, &with_ct(MANIFEST, "application/manifest+json")).await
+        }
+        ("/sw.js", _) => simple_http(stream, 200, &with_ct(SW_JS, "text/javascript")).await,
+        ("/icon.svg", _) => simple_http(stream, 200, &with_ct(ICON_SVG, "image/svg+xml")).await,
         ("/", false) => simple_http(stream, 403, "missing or bad token").await,
         _ => simple_http(stream, 404, "not found").await,
     }
 }
 
 async fn simple_http(mut stream: TcpStream, code: u16, body: &str) -> Result<()> {
+    let ct = if body.starts_with("<!doctype") {
+        "text/html; charset=utf-8"
+    } else if body.starts_with('{') && body.contains("\"name\"") {
+        "application/manifest+json"
+    } else if body.starts_with("//") {
+        "text/javascript; charset=utf-8"
+    } else if body.starts_with("<svg") {
+        "image/svg+xml"
+    } else {
+        "text/plain; charset=utf-8"
+    };
+    respond_http(&mut stream, code, body, ct).await
+}
+
+async fn respond_http(stream: &mut TcpStream, code: u16, body: &str, ct: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let reason = match code {
         200 => "OK",
@@ -416,17 +439,16 @@ async fn simple_http(mut stream: TcpStream, code: u16, body: &str) -> Result<()>
         404 => "Not Found",
         _ => "Error",
     };
-    let ct = if body.starts_with("<!doctype") {
-        "text/html; charset=utf-8"
-    } else {
-        "text/plain; charset=utf-8"
-    };
     let resp = format!(
         "HTTP/1.1 {code} {reason}\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(resp.as_bytes()).await?;
     Ok(())
+}
+
+fn with_ct(body: &str, _ct: &str) -> String {
+    body.to_string() // content-type 由 simple_http 嗅探；参数保留给调用方可读性
 }
 
 /// AgentEvent → 协议事件 JSON（协议文档 §组件二的事件面）。
@@ -803,6 +825,26 @@ fn hostname() -> String {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "crab-host".into())
+}
+
+/// `crab serve --pair`：打印配对信息（URL + 终端二维码占位）。
+/// P3 最小实现：URL + token + 文字指引。二维码的终端渲染需要
+/// 一个 QR 库——P3 不加依赖，先把 URL 打印清楚（手机浏览器手动输入或
+/// 从同一 tailnet 的桌面浏览器复制）。真 QR 是 P4 的依赖决策。
+pub fn print_pair(host: &str, port: u16) -> Result<()> {
+    let ip = parse_bind(host)?;
+    let token = device_token()?;
+    let url = format!("http://{ip}:{port}/?token={token}");
+    println!("pair this device with crab serve:");
+    println!();
+    println!("  url:   {url}");
+    println!();
+    println!("  open it in the phone browser on the same LAN/tailnet,");
+    println!("  then 'Add to Home Screen' for the app experience.");
+    println!();
+    println!("  the token is stored at ~/.crab/serve/token (0600).");
+    println!("  keep this URL private — it grants full control.");
+    Ok(())
 }
 
 #[cfg(test)]
