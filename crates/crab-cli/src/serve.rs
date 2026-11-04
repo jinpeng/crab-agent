@@ -20,9 +20,8 @@ use futures::stream::StreamExt;
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{Mutex, broadcast};
-use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const INDEX_HTML: &str = include_str!("serve/web/index.html");
@@ -78,7 +77,7 @@ struct Shared {
     /// 当前激活的 workspace（客户端 attach/prompt 的目标）。
     active: std::sync::Mutex<String>,
     tx: broadcast::Sender<EventRec>,
-    replay: Mutex<std::collections::VecDeque<EventRec>>,
+    replay: std::sync::Mutex<std::collections::VecDeque<EventRec>>,
     seq: std::sync::atomic::AtomicU64,
     run_state: std::sync::Mutex<&'static str>,
     confirms: ConfirmHub,
@@ -95,12 +94,18 @@ impl Shared {
     }
 
     async fn publish(&self, event: Value) {
+        self.publish_sync(event);
+    }
+
+    /// 同步发布（confirmer 用——同步闭包不能 await tokio Mutex，也不能
+    /// spawn 进 async publish）。replay 用 std::sync::Mutex 才能同步访问。
+    fn publish_sync(&self, event: Value) {
         let rec = EventRec {
             seq: self.next_seq(),
             event,
         };
         {
-            let mut buf = self.replay.lock().await;
+            let mut buf = self.replay.lock().unwrap();
             buf.push_back(rec.clone());
             while buf.len() > REPLAY_CAP {
                 buf.pop_front();
@@ -159,7 +164,7 @@ impl Shared {
             &self.config,
             self.provider_name.as_deref(),
             &self.gate,
-            false,
+            true, // serve 总是新 session：续旧会话可能加载不完整的 tool_use/tool_result 配对（DeepSeek 400）
         )
         .map_err(|e| format!("assemble agent for {workspace}: {e}"))?;
         let agent = std::sync::Arc::new(Mutex::new(agent));
@@ -218,33 +223,29 @@ impl Shared {
         Arc::new(move |prompt: Prompt| {
             let (tx, rx) = std::sync::mpsc::channel::<Decision>();
             let id = shared.confirms.insert(tx);
-            let shared2 = shared.clone();
-            let p = prompt.clone();
-            tokio::spawn(async move {
-                shared2
-                    .publish(serde_json::json!({
-                        "kind": "confirm_req",
-                        "confirm_id": id,
-                        "tool": p.tool,
-                        "summary": p.summary,
-                    }))
-                    .await;
-            });
-            // 超时即 Deny：客户端断线时工具不能无限挂起。
+            // 不能 tokio::spawn——confirmer 是同步闭包（gate.check 在 tool
+            // execute 里同步调用），spawn 在无 runtime 上下文处 panic/静默失败，
+            // confirm_req 发不出去、channel 断开 → 立即 Deny（这就是写操作
+            // 直接被 permission denied、卡片不弹的根因）。
+            // broadcast::Sender::send 本身是同步的，直接同步发。
+            shared.publish_sync(serde_json::json!({
+                "kind": "confirm_req",
+                "confirm_id": id,
+                "tool": prompt.tool,
+                "summary": prompt.summary,
+            }));
+            // 阻塞等决策。占住当前 worker，但 crab 是 multi-thread runtime，
+            // 其他 worker 照常处理 ws 与 approve（与 TUI ConfirmBridge 同款
+            // 故意阻塞）。超时或断开一律 Deny——宁可错杀不可放行。
             let decision = rx
                 .recv_timeout(std::time::Duration::from_secs(120))
                 .unwrap_or(Decision::Deny);
             shared.confirms.remove(id);
-            let shared3 = shared.clone();
-            tokio::spawn(async move {
-                shared3
-                    .publish(serde_json::json!({
-                        "kind": "confirm_resolved",
-                        "confirm_id": id,
-                        "decision": format!("{decision:?}").to_lowercase(),
-                    }))
-                    .await;
-            });
+            shared.publish_sync(serde_json::json!({
+                "kind": "confirm_resolved",
+                "confirm_id": id,
+                "decision": format!("{decision:?}").to_lowercase(),
+            }));
             decision
         })
     }
@@ -299,6 +300,73 @@ fn parse_bind(host: &str) -> Result<IpAddr> {
 fn serve_dir() -> Result<std::path::PathBuf> {
     let home = std::env::home_dir().context("home dir")?;
     Ok(home.join(".crab").join("serve"))
+}
+
+/// TLS 材料（自签 Ed25519，SANs 覆盖 bind 地址 + localhost + 主机名）。
+/// 首次生成写到 ~/.crab/serve/{cert,key}.pem 后复用。iOS 完全信任要求
+/// Basic Constraints CA:TRUE（否则导入描述文件报 -25294）。
+fn tls_material(
+    bind_ip: &IpAddr,
+) -> Result<(
+    Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>,
+    tokio_rustls::rustls::pki_types::PrivateKeyDer<'static>,
+)> {
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let dir = serve_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    if let (Ok(cert), Ok(key)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
+        return Ok((
+            vec![CertificateDer::from(cert)],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+        ));
+    }
+    let mut params = rcgen::CertificateParams::new(vec![
+        bind_ip.to_string(),
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+        hostname(),
+    ])?;
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "crab-serve");
+    let key_pair = rcgen::KeyPair::generate()?;
+    let cert = params.self_signed(&key_pair)?;
+    let cert_der = cert.der().to_vec();
+    let key_der = key_pair.serialize_der();
+    std::fs::write(&cert_path, &cert_der)?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&key_path)?
+            .write_all(&key_der)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&key_path, &key_der)?;
+    Ok((
+        vec![CertificateDer::from(cert_der)],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+    ))
+}
+
+/// 证书 SHA-256 指纹（TOFU 比对用）。
+fn cert_fingerprint(cert_der: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(cert_der)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// workspace registry 持久化（P1）：`~/.crab/serve/config.toml`，
@@ -375,14 +443,29 @@ fn query_token(query: &str) -> Option<&str> {
 
 /// HTTP/WS 分流：tungstenite 的 accept_hdr_async 自己完成 101 握手，
 /// 非 WS 路径走最小 HTTP 响应。鉴权在握手回调里（ws）或路由里（页面）。
-async fn handle_conn(stream: TcpStream, shared: Arc<Shared>, token: Arc<String>) -> Result<()> {
-    // peek 前 2KB 判断路径——不消耗字节，tungstenite 能看到完整握手。
-    let mut peek = [0u8; 2048];
-    let n = stream.peek(&mut peek).await?;
-    if n == 0 {
-        return Ok(());
-    }
-    let head = String::from_utf8_lossy(&peek[..n]);
+async fn handle_conn<S>(mut stream: S, _shared: Arc<Shared>, token: Arc<String>) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // 预读握手头（TLS 流无 peek）。/ws 分支的握手由独立 wss 端口承接（见
+    // run），这里 /ws 只回 426 指引——主端口不再处理 ws 升级。
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let head_end = loop {
+        use tokio::io::AsyncReadExt;
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4) {
+            break p;
+        }
+        if buf.len() > 16 * 1024 {
+            return Ok(());
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]);
     let line = head.lines().next().unwrap_or("");
     let path = line.split_whitespace().nth(1).unwrap_or("/");
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
@@ -390,14 +473,22 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>, token: Arc<String>)
 
     match (route, ok_token) {
         ("/healthz", _) => simple_http(stream, 200, "ok").await,
-        ("/ws", true) => {
-            // clippy::result_large_err：tungstenite 握手错误类型大，但这条路
-            // 径不构造 Err——ok 分支直接进 WS 会话。
-            #[allow(clippy::result_large_err)]
-            let cb = |_req: &Request, resp: Response| Ok(resp);
-            let ws = tokio_tungstenite::accept_hdr_async(stream, cb).await?;
-            handle_ws(ws, shared).await
+        // 证书分发（DER 二进制）：iOS 完全信任自签证书需安装描述文件。
+        // 主 https 端口也发一份（已信任后访问）；明文分发走 port+1（见 run）。
+        ("/cert.pem", _) => {
+            let bytes = std::fs::read(serve_dir()?.join("cert.pem")).unwrap_or_default();
+            use tokio::io::AsyncWriteExt;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/x-x509-ca-cert\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                bytes.len()
+            );
+            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(&bytes).await?;
+            Ok(())
         }
+        // /ws 在独立 wss 端口（port+2）承接——主端口只做 https 页面。
+        // 预读已消耗握手头，这里无法回退给 tungstenite，故指引到正确端口。
+        ("/ws", true) => simple_http(stream, 426, "use wss on port+2").await,
         ("/ws", false) => simple_http(stream, 403, "missing or bad token").await,
         ("/", true) => {
             let html = INDEX_HTML.replace(
@@ -416,7 +507,10 @@ async fn handle_conn(stream: TcpStream, shared: Arc<Shared>, token: Arc<String>)
     }
 }
 
-async fn simple_http(mut stream: TcpStream, code: u16, body: &str) -> Result<()> {
+async fn simple_http<S>(mut stream: S, code: u16, body: &str) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let ct = if body.starts_with("<!doctype") {
         "text/html; charset=utf-8"
     } else if body.starts_with('{') && body.contains("\"name\"") {
@@ -431,7 +525,10 @@ async fn simple_http(mut stream: TcpStream, code: u16, body: &str) -> Result<()>
     respond_http(&mut stream, code, body, ct).await
 }
 
-async fn respond_http(stream: &mut TcpStream, code: u16, body: &str, ct: &str) -> Result<()> {
+async fn respond_http<S>(stream: &mut S, code: u16, body: &str, ct: &str) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::AsyncWriteExt;
     let reason = match code {
         200 => "OK",
@@ -534,7 +631,7 @@ fn assemble_agent(
     ))
 }
 
-pub async fn run(host: &str, port: u16) -> Result<()> {
+pub async fn run(host: &str, port: u16, http_cert: bool) -> Result<()> {
     let ip = parse_bind(host)?;
     let token = Arc::new(device_token()?);
     let cwd = std::env::current_dir().context("cwd")?;
@@ -569,7 +666,7 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
         agents: Mutex::new(std::collections::HashMap::new()),
         active: std::sync::Mutex::new(cwd_name.clone()),
         tx: broadcast::channel(256).0,
-        replay: Mutex::new(std::collections::VecDeque::new()),
+        replay: std::sync::Mutex::new(std::collections::VecDeque::new()),
         seq: std::sync::atomic::AtomicU64::new(0),
         run_state: std::sync::Mutex::new("idle"),
         confirms: ConfirmHub::new(),
@@ -585,17 +682,137 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
+
+    // TLS：iOS Safari 对非 localhost 的明文 ws 有硬性安全限制，serve 默认 wss。
+    // 自签证书 + TOFU（首次访问比对指纹后信任）。
+    let (certs, key) = tls_material(&ip)?;
+    let fingerprint = cert_fingerprint(certs[0].as_ref());
+    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("build tls config")?;
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
+
+    // 明文 HTTP 证书分发（port+1）：解决 iOS"下载需信任、信任需下载"的循环。
+    if http_cert {
+        let cert_bytes = std::fs::read(serve_dir()?.join("cert.pem")).unwrap_or_default();
+        let cert_addr = SocketAddr::new(ip, port + 1);
+        tokio::spawn(async move {
+            let Ok(l) = TcpListener::bind(cert_addr).await else {
+                eprintln!("[serve] cert-http bind {cert_addr} failed (in use?)");
+                return;
+            };
+            eprintln!("  cert (plain): http://{cert_addr}/cert.pem");
+            loop {
+                let Ok((mut s, _)) = l.accept().await else {
+                    continue;
+                };
+                let b = cert_bytes.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/x-x509-ca-cert\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        b.len()
+                    );
+                    if s.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if s.write_all(&b).await.is_err() {
+                        return;
+                    }
+                    let _ = s.shutdown().await;
+                });
+            }
+        });
+    }
+
+    // WSS 独立端口（port+2）：tungstenite 的 accept_hdr_async 完整处理握手
+    //（不手写 101——iOS Safari 兼容性由库保证）。token 在握手回调里验。
+    {
+        let ws_addr = SocketAddr::new(ip, port + 2);
+        let acceptor2 = tls_acceptor.clone();
+        let shared2 = shared.clone();
+        let token2 = token.clone();
+        tokio::spawn(async move {
+            let Ok(l) = TcpListener::bind(ws_addr).await else {
+                eprintln!("[serve] wss bind {ws_addr} failed (in use?)");
+                return;
+            };
+            eprintln!("  wss:           wss://{ws_addr}/ws");
+            loop {
+                let Ok((stream, _)) = l.accept().await else {
+                    continue;
+                };
+                let acceptor = acceptor2.clone();
+                let shared = shared2.clone();
+                let token = token2.clone();
+                tokio::spawn(async move {
+                    let Ok(stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let expected = token.clone();
+                    #[allow(clippy::result_large_err)]
+                    let cb =
+                        move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                              resp: tokio_tungstenite::tungstenite::handshake::server::Response|
+                              -> Result<
+                            _,
+                            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+                        > {
+                            let uri = req.uri().to_string();
+                            let ok = uri
+                                .split('?')
+                                .nth(1)
+                                .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
+                                .is_some_and(|t| t == expected.as_str());
+                            if ok {
+                                Ok(resp)
+                            } else {
+                                Err(tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(
+                                Some("missing or bad token".into()),
+                            ))
+                            }
+                        };
+                    let ws = match tokio_tungstenite::accept_hdr_async(stream, cb).await {
+                        Ok(w) => w,
+                        Err(e) => {
+                            if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                                eprintln!("[dbg] wss handshake rejected/failed: {e}");
+                            }
+                            return;
+                        }
+                    };
+                    if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                        eprintln!("[dbg] wss client connected");
+                    }
+                    if let Err(e) = handle_ws(ws, shared).await {
+                        eprintln!("[serve] wss error: {e:#}");
+                    }
+                });
+            }
+        });
+    }
+
     eprintln!("crab serve v{VERSION}");
-    eprintln!("  workspace: {}", shared.active());
-    eprintln!("  url:       http://{addr}/?token={token}");
-    eprintln!("  healthz:   http://{addr}/healthz");
-    eprintln!("  note: P1 has an approval channel but no TLS yet — trusted LAN/tailnet only");
+    eprintln!("  workspace:   {}", shared.active());
+    eprintln!("  url:         https://{addr}/?token={token}");
+    eprintln!("  healthz:     https://{addr}/healthz");
+    eprintln!("  cert sha256: {fingerprint}");
+    eprintln!("  note: self-signed — on iOS, trust the cert then open the URL");
 
     loop {
         let (stream, _) = listener.accept().await?;
         let shared = shared.clone();
         let token = token.clone();
+        let acceptor = tls_acceptor.clone();
         tokio::spawn(async move {
+            let stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[serve] tls handshake failed: {e}");
+                    return;
+                }
+            };
             if let Err(e) = handle_conn(stream, shared, token).await {
                 eprintln!("[serve] conn error: {e:#}");
             }
@@ -610,6 +827,23 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut out, mut input) = ws.split();
+    // 连接建立即主动推 status + workspace.list——客户端 onopen 立刻发请求
+    // 在部分浏览器（手机 Safari）上会丢前几条，服务端推送消除这个竞态。
+    let hello = json!({
+        "type": "response", "id": "_hello", "ok": true,
+        "data": {
+            "host": hostname(),
+            "version": VERSION,
+            "workspace": shared.active(),
+            "state": {"run_state": shared.state()},
+        }
+    });
+    out.send(hello.to_string().into()).await?;
+    let wl = json!({
+        "type": "response", "id": "_workspaces", "ok": true,
+        "data": {"workspaces": shared.workspace_names(), "active": shared.active()}
+    });
+    out.send(wl.to_string().into()).await?;
     let mut events = shared.tx.subscribe();
     loop {
         tokio::select! {
@@ -627,8 +861,29 @@ where
             rec = events.recv() => {
                 match rec {
                     Ok(rec) => {
+                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                            eprintln!("[dbg] ws recv-event seq={} kind={}", rec.seq, rec.event["kind"]);
+                        }
                         let frame = json!({"type":"event","seq":rec.seq,"event":rec.event});
-                        out.send(frame.to_string().into()).await?;
+                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                            eprintln!("[dbg] ws send seq={} kind={}", rec.seq, rec.event["kind"]);
+                        }
+                        // send（入队+flush）加超时：慢/暂停的客户端（手机 Safari
+                        // 后台节流）会让 flush 永久 pending，饿死后续事件
+                        //（confirm_req 被卡的根因）。超时则跳过本次 flush——帧已入
+                        // tungstenite 内部缓冲，连接恢复或下一帧时会补发；超时
+                        // 不视为失败，循环继续收下一事件。
+                        let send = out.send(frame.to_string().into());
+                        if let Err(e) = tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            send,
+                        )
+                        .await
+                        {
+                            eprintln!("[dbg] ws send TIMEOUT seq={} (client slow): {e}", rec.seq);
+                            // 继续循环——超时不是致命错误，广播缓冲里还有后续事件
+                            continue;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -655,7 +910,7 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
         })),
         "attach" => {
             let after = v["after_seq"].as_u64();
-            let buf = shared.replay.lock().await;
+            let buf = shared.replay.lock().unwrap();
             let head_seq = buf.back().map(|r| r.seq).unwrap_or(0);
             let replay: Vec<Value> = buf
                 .iter()
@@ -923,7 +1178,7 @@ fn hostname() -> String {
 pub fn print_pair(host: &str, port: u16) -> Result<()> {
     let ip = parse_bind(host)?;
     let token = device_token()?;
-    let url = format!("http://{ip}:{port}/?token={token}");
+    let url = format!("https://{ip}:{port}/?token={token}");
     println!("pair this device with crab serve:\n");
     println!("  {url}\n");
     // 终端 QR：Unicode 半块字符，两行字符一行点。

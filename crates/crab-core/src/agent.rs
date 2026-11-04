@@ -554,6 +554,14 @@ impl Agent {
         let run_id = self.next_run_id;
         self.next_run_id += 1;
         let result = self.run_inner(user_input, run_id, &stream_tx).await;
+        // 保证 Finished 一定发出（错误路径也要）——否则观察者（TUI 状态栏、
+        // serve 的 run_state）会卡在 running。run_inner 内部在 abort 时已发，
+        // 但 provider/IO 错误路径没有；这里统一补发幂等的 Finished。
+        if result.is_err() {
+            let _ = self.events_tx.send(AgentEvent::Finished {
+                reason: StopReason::Error,
+            });
+        }
         // Ensure all deltas forwarded before returning, then stop the task.
         drop(stream_tx);
         forward.abort();

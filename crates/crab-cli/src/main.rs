@@ -72,6 +72,10 @@ enum Commands {
         /// (subcommand of serve, not a separate top-level one).
         #[arg(long)]
         pair: bool,
+        /// 同时在 port+1 开一个明文 HTTP 端口只服务 /cert.pem（证书分发，
+        /// 解决 iOS "下载需信任、信任需下载"的循环；证书本身公开）。
+        #[arg(long, default_value_t = true)]
+        http_cert: bool,
     },
 }
 
@@ -87,11 +91,17 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Commands::Metrics { days, json }) = &cli.command {
         return metrics::report(*days, *json);
     }
-    if let Some(Commands::Serve { host, port, pair }) = &cli.command {
+    if let Some(Commands::Serve {
+        host,
+        port,
+        pair,
+        http_cert,
+    }) = &cli.command
+    {
         if *pair {
             return serve::print_pair(host, *port);
         }
-        return serve::run(host, *port).await;
+        return serve::run(host, *port, *http_cert).await;
     }
     if let Some(prompt) = cli.print.clone() {
         return run_print(&cli, prompt).await;

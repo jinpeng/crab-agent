@@ -61,6 +61,7 @@
   <span id="st">connecting…</span>
   <span class="spacer"></span>
   <span id="ctx"></span>
+  <span style="font-size:10px;color:#3a424d" id="dbg"></span>
 </header>
 <main id="log"><div id="empty">waiting for activity…</div></main>
 <div id="confirms"></div>
@@ -77,6 +78,9 @@
 const tok = new URLSearchParams(location.search).get('token') || localStorage.crabToken || '';
 if (tok) localStorage.crabToken = tok;
 const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+// ws 走独立端口（serve 的 wss 端口 = http 端口 + 2，见 serve.rs）。
+const wsPort = String(Number(location.port || (location.protocol === 'https:' ? 443 : 80)) + 2);
+const wsHost = `${location.hostname}:${wsPort}`;
 const log = document.getElementById('log');
 const empty = document.getElementById('empty');
 const st = document.getElementById('st');
@@ -86,6 +90,7 @@ const wsSel = document.getElementById('ws');
 const confirmsEl = document.getElementById('confirms');
 let ws, seq = 0, activeWs = '', runState = 'idle', reqSeq = 100;
 const pendingConfirms = new Map();
+function dbgSet(s) { const d = document.getElementById('dbg'); if (d) d.textContent = s; }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if ('Notification' in window && Notification.permission === 'default') {
@@ -110,11 +115,12 @@ function notify(title, body) {
 }
 
 function connect() {
-  ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(tok)}`);
+  const WS = `${proto}//${location.hostname}:${Number(location.port||443)+2}/ws?token=${encodeURIComponent(tok)}`;
+  ws = new WebSocket(WS);
   ws.onopen = () => {
     dot.className = 'dot on';
-    ws.send(JSON.stringify({id:'s1', type:'status'}));
-    ws.send(JSON.stringify({id:'w1', type:'workspace.list'}));
+    // 服务端在连接建立时主动推 status + workspace.list（见 serve.rs
+    // handle_ws 的 hello）——客户端只需 attach。
     ws.send(JSON.stringify({id:'a1', type:'attach'}));
   };
   ws.onclose = () => {
@@ -124,6 +130,9 @@ function connect() {
   };
   ws.onmessage = (m) => {
     const r = JSON.parse(m.data);
+    // 调试：右上角显示最近收到的事件类型（诊断 confirm_req 是否到达手机）。
+    const dbg = document.getElementById('dbg');
+    if (dbg) dbg.textContent = (r.type === 'event' ? r.event.kind : r.type) + ' ' + (r.seq || '');
     if (r.type === 'response') return onResp(r);
     if (r.type === 'event') { seq = r.seq; return onEvent(r.event); }
   };
@@ -155,8 +164,18 @@ function onEvent(e, isReplay) {
     case 'tool_call_finished': add('tool', e.is_error ? '✗ error' : '✓ done', 'tool'); break;
     case 'usage': ctx.textContent = `↑${e.prompt} ↓${e.completion}`; break;
     case 'compacted': add('run', `compacted ${e.turns} turns`, 'compact'); break;
-    case 'confirm_req': showConfirm(e.confirm_id, e.tool, e.summary); break;
-    case 'confirm_resolved': hideConfirm(e.confirm_id); break;
+    case 'confirm_req':
+      // 最强视觉标记：整页背景闪黄，不依赖卡片 DOM——排除 showConfirm 的
+      // 任何失败路径。事件到了就一定会变。
+      document.body.style.background = '#3a3000';
+      dbgSet('CONFIRM_REQ id=' + e.confirm_id);
+      showConfirm(e.confirm_id, e.tool, e.summary);
+      break;
+    case 'confirm_resolved':
+      document.body.style.background = '';
+      dbgSet('resolved ' + e.confirm_id);
+      hideConfirm(e.confirm_id);
+      break;
     case 'workspace.added': case 'workspace.switched': ws && ws.send(JSON.stringify({id:'w2',type:'workspace.list'})); break;
     case 'steer.queued': add('run', e.text, 'steer'); break;
     case 'reflected': add('run', `remembered ${e.accepted}/${e.total} lessons`, 'reflect'); break;
@@ -204,8 +223,10 @@ function showConfirm(id, tool, summary) {
   });
   pendingConfirms.set(id, card);
   confirmsEl.appendChild(card);
-  if (navigator.vibrate) navigator.vibrate([30, 40, 30]);
-  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  // vibrate/scrollIntoView 在部分浏览器（非用户手势触发）会抛异常，
+  // 阻断后续渲染——包裹 try/catch 容错。
+  try { if (navigator.vibrate) navigator.vibrate([30, 40, 30]); } catch (_) {}
+  try { card.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
 }
 function hideConfirm(id) {
   const c = pendingConfirms.get(id);
