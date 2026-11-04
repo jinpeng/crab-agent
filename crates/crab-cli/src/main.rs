@@ -3,6 +3,7 @@ use clap::Parser;
 mod app;
 mod metrics;
 mod render;
+mod serve;
 mod status;
 mod theme;
 mod trace;
@@ -58,6 +59,16 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run the remote-control daemon (PWA + JSONL/WebSocket). Binds to a
+    /// concrete local interface; a device token gates the page and socket.
+    Serve {
+        /// Interface IP to bind (loopback/LAN/tailnet). Refuses wildcards.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on.
+        #[arg(long, default_value = "7391")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -71,6 +82,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(Commands::Metrics { days, json }) = &cli.command {
         return metrics::report(*days, *json);
+    }
+    if let Some(Commands::Serve { host, port }) = &cli.command {
+        return serve::run(host, *port).await;
     }
     if let Some(prompt) = cli.print.clone() {
         return run_print(&cli, prompt).await;
