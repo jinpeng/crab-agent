@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use crab_core::agent::{Agent, AgentConfig, AgentEvent};
-use crab_core::gate::PermissionGate;
+use crab_core::gate::{Confirmer, Decision, PermissionGate, Prompt};
 use crab_core::session::Session;
 use crab_core::state::SessionState;
 use crab_core::tools::register_all;
@@ -35,6 +35,40 @@ struct EventRec {
     event: Value,
 }
 
+/// confirmer/approve 需要的最小状态（可从 Shared 拆出独立测试）。
+struct ConfirmHub {
+    map: std::sync::Mutex<std::collections::HashMap<u64, std::sync::mpsc::Sender<Decision>>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl ConfirmHub {
+    fn new() -> Self {
+        Self {
+            map: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next_id: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    fn insert(&self, tx: std::sync::mpsc::Sender<Decision>) -> u64 {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.map.lock().unwrap().insert(id, tx);
+        id
+    }
+    fn remove(&self, id: u64) {
+        self.map.lock().unwrap().remove(&id);
+    }
+    fn resolve(&self, id: u64, decision: Decision) -> bool {
+        if let Some(tx) = self.map.lock().unwrap().remove(&id) {
+            let _ = tx.send(decision);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 struct Shared {
     agent: Mutex<Agent>,
     workspace: String,
@@ -42,6 +76,10 @@ struct Shared {
     replay: Mutex<std::collections::VecDeque<EventRec>>,
     seq: std::sync::atomic::AtomicU64,
     run_state: std::sync::Mutex<&'static str>,
+    /// 待决 confirm 路由（TUI ConfirmBridge 的 ws 版）。
+    confirms: ConfirmHub,
+    /// serve 管理的 workspace 白名单（P1 起持久化在 ~/.crab/serve/config.toml）。
+    workspaces: std::sync::Mutex<Vec<String>>,
 }
 
 impl Shared {
@@ -73,6 +111,71 @@ impl Shared {
     fn state(&self) -> String {
         self.run_state.lock().unwrap().to_string()
     }
+
+    /// 远程审批的 Confirmer：阻塞（在 tool future 里被同步调用）等任意
+    /// 已连接客户端的 approve。广播 confirm_req，首个到达的决策生效；
+    /// 超时（120s）或通道断开一律 Deny——宁可错杀不可放行。
+    fn confirmer(self: &Arc<Self>) -> Confirmer {
+        let shared = self.clone();
+        Arc::new(move |prompt: Prompt| {
+            let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+            let id = shared.confirms.insert(tx);
+            let shared2 = shared.clone();
+            let p = prompt.clone();
+            tokio::spawn(async move {
+                shared2
+                    .publish(serde_json::json!({
+                        "kind": "confirm_req",
+                        "confirm_id": id,
+                        "tool": p.tool,
+                        "summary": p.summary,
+                    }))
+                    .await;
+            });
+            // 超时即 Deny：客户端断线时工具不能无限挂起。
+            let decision = rx
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .unwrap_or(Decision::Deny);
+            shared.confirms.remove(id);
+            let shared3 = shared.clone();
+            tokio::spawn(async move {
+                shared3
+                    .publish(serde_json::json!({
+                        "kind": "confirm_resolved",
+                        "confirm_id": id,
+                        "decision": format!("{decision:?}").to_lowercase(),
+                    }))
+                    .await;
+            });
+            decision
+        })
+    }
+
+    /// 客户端 approve：只对当前 pending 的 id 有效（防重放）。
+    fn approve(&self, confirm_id: u64, decision: Decision) -> bool {
+        self.confirms.resolve(confirm_id, decision)
+    }
+
+    fn workspace_names(&self) -> Vec<String> {
+        self.workspaces.lock().unwrap().clone()
+    }
+
+    fn workspace_add(&self, path: String) -> Result<(), String> {
+        let p = std::path::Path::new(&path);
+        let canon = p
+            .canonicalize()
+            .map_err(|e| format!("cannot access {path}: {e}"))?;
+        if !canon.is_dir() {
+            return Err(format!("{path} is not a directory"));
+        }
+        let name = canon.display().to_string();
+        let mut ws = self.workspaces.lock().unwrap();
+        if !ws.contains(&name) {
+            ws.push(name.clone());
+            save_workspaces(&ws).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
 }
 
 /// 解析 bind 地址：必须是具体接口（loopback/LAN/tailnet），拒绝通配。
@@ -98,6 +201,40 @@ fn parse_bind(host: &str) -> Result<IpAddr> {
 fn serve_dir() -> Result<std::path::PathBuf> {
     let home = std::env::home_dir().context("home dir")?;
     Ok(home.join(".crab").join("serve"))
+}
+
+/// workspace registry 持久化（P1）：`~/.crab/serve/config.toml`，
+/// TOML 里一个 `workspaces = [...]` 数组。丢失/损坏=空表（启动时 cwd
+/// 永远自动注册），不报错——配置是增强，不是启动条件。
+fn load_workspaces() -> Vec<String> {
+    let path = match serve_dir() {
+        Ok(d) => d.join("config.toml"),
+        Err(_) => return Vec::new(),
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    toml::from_str::<toml::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("workspaces")?
+                .as_array()?
+                .iter()
+                .map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_workspaces(list: &[String]) -> std::io::Result<()> {
+    let dir = serve_dir().map_err(std::io::Error::other)?;
+    std::fs::create_dir_all(&dir)?;
+    let items = list
+        .iter()
+        .map(|w| format!("{w:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(dir.join("config.toml"), format!("workspaces = [{items}]\n"))
 }
 
 /// device token：32 字节随机 hex，首次生成写到 ~/.crab/serve/token（0600），
@@ -255,8 +392,22 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
     let config =
         crab_core::config::Config::load_from(None).map_err(|e| anyhow::anyhow!("config: {e}"))?;
     let (provider, resolved) = crate::app::resolve_provider(&config, None)?;
-    let gate = PermissionGate::yolo();
-    let tools = register_all(SessionState::default(), gate);
+    // gate 的 confirmer 要在 register_all 前就位，但它依赖 shared（事件
+    // 广播），shared 又依赖 agent——循环。解法是**延迟注入**：gate 先拿
+    // 一个转发闭包，shared 建好后把真正的 confirmer 填进去。注入前
+    // confirmer 一律 Deny（保守默认）。
+    let late_confirmer: Arc<std::sync::Mutex<Option<Confirmer>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let gate = PermissionGate::with_confirmer({
+        let late = late_confirmer.clone();
+        Arc::new(move |p: Prompt| {
+            match late.lock().unwrap().as_ref() {
+                Some(c) => c(p),
+                None => Decision::Deny, // serve 未就绪时所有写操作拒绝
+            }
+        })
+    });
+    let tools = register_all(SessionState::default(), gate.clone());
     let dir = cwd.join(".crab").join("sessions");
     let session = match crate::app::latest_session(&dir) {
         Some(p) => Session::load(&p).with_context(|| format!("load {}", p.display()))?,
@@ -275,14 +426,26 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
         },
     );
 
+    // workspace registry：持久化的列表 + cwd（永远注册，去重）。
+    let mut initial_ws = load_workspaces();
+    let cwd_name = cwd.display().to_string();
+    if !initial_ws.contains(&cwd_name) {
+        initial_ws.push(cwd_name.clone());
+        let _ = save_workspaces(&initial_ws); // 失败不阻塞启动
+    }
+
     let shared = Arc::new(Shared {
         agent: Mutex::new(agent),
-        workspace: cwd.display().to_string(),
+        workspace: cwd_name,
         tx: broadcast::channel(256).0,
         replay: Mutex::new(std::collections::VecDeque::new()),
         seq: std::sync::atomic::AtomicU64::new(0),
         run_state: std::sync::Mutex::new("idle"),
+        confirms: ConfirmHub::new(),
+        workspaces: std::sync::Mutex::new(initial_ws),
     });
+    // 注入真正的远程审批 confirmer（注入前一律 Deny——保守默认）。
+    *late_confirmer.lock().unwrap() = Some(shared.confirmer());
 
     // Agent 事件 → 协议事件（广播 + 回放缓冲）+ run_state 跟踪。
     {
@@ -322,9 +485,7 @@ pub async fn run(host: &str, port: u16) -> Result<()> {
     eprintln!("  workspace: {}", shared.workspace);
     eprintln!("  url:       http://{addr}/?token={token}");
     eprintln!("  healthz:   http://{addr}/healthz");
-    eprintln!(
-        "  note: P0 has no TLS and no approval channel (gate=yolo) — trusted LAN/tailnet only"
-    );
+    eprintln!("  note: P1 has an approval channel but no TLS yet — trusted LAN/tailnet only");
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -385,7 +546,7 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
                 "version": VERSION,
                 "workspace": shared.workspace,
                 "state": {"run_state": shared.state()},
-                "note": "P0: no TLS, no approval channel (gate=yolo)",
+                "note": "P1: approval channel live; no TLS yet (P2)",
             }
         })),
         "attach" => {
@@ -418,8 +579,44 @@ async fn dispatch(v: Value, shared: &Arc<Shared>) -> Option<Value> {
             shared.agent.lock().await.abort();
             Some(json!({"type":"response","ok":true}))
         }
+        "approve" => {
+            let id = v["confirm_id"].as_u64().unwrap_or(0);
+            let decision = match v["decision"].as_str().unwrap_or("") {
+                "allow" | "y" | "yes" => Decision::Allow,
+                "allow_all" | "all" | "a" => Decision::AllowAll,
+                "deny" | "n" | "no" => Decision::Deny,
+                other => {
+                    return Some(err(format!(
+                        "bad decision {other:?} (allow|deny|allow_all)"
+                    )));
+                }
+            };
+            if shared.approve(id, decision) {
+                Some(json!({"type":"response","ok":true}))
+            } else {
+                Some(err(format!(
+                    "no pending confirm {id} (already resolved or unknown)"
+                )))
+            }
+        }
+        "workspace.list" => Some(json!({
+            "type": "response", "ok": true,
+            "data": {"workspaces": shared.workspace_names(),
+                     "active": shared.workspace}
+        })),
+        "workspace.add" => {
+            let path = v["path"].as_str().unwrap_or("").to_string();
+            match shared.workspace_add(path) {
+                Ok(()) => {
+                    let names = shared.workspace_names();
+                    shared.publish(json!({"kind":"workspace.added"})).await;
+                    Some(json!({"type":"response","ok":true,"data":{"workspaces":names}}))
+                }
+                Err(e) => Some(err(e)),
+            }
+        }
         _ => Some(err(format!(
-            "unknown command {ty:?} (P0 supports: status, attach, prompt, abort)"
+            "unknown command {ty:?} (supports: status, attach, prompt, abort, approve, workspace.list, workspace.add)"
         ))),
     }
 }
@@ -462,5 +659,75 @@ mod tests {
             reason: crab_core::types::StopReason::EndTurn,
         };
         assert_eq!(event_json(&e).unwrap()["kind"], "finished");
+    }
+
+    /// P1 核心：ConfirmHub 的插入/路由/移除 + confirmer 的广播与阻塞等待。
+    /// 全流程不经过 LLM。
+    #[tokio::test]
+    async fn confirm_hub_routes_decision_and_rejects_replay() {
+        let hub = ConfirmHub::new();
+        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+        let id = hub.insert(tx);
+        // resolve 路由到等待中的 receiver。
+        assert!(hub.resolve(id, Decision::Allow));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
+            Decision::Allow
+        );
+        // 重放：同一 id 再 resolve 必须失败。
+        assert!(!hub.resolve(id, Decision::Allow));
+        // 未知 id 失败。
+        assert!(!hub.resolve(999, Decision::Deny));
+    }
+
+    /// confirmer 的完整链路：广播 confirm_req → approve → 阻塞的调用方
+    /// 拿到决策 → 广播 confirm_resolved。构造一个最小 Shared 替代品——
+    /// confirmer 只依赖 confirms/tx/seq，workspaces/agent 不触碰。
+    /// 由于 Rust 不允许部分构造，这里直接测 ConfirmHub + 手动复刻
+    /// confirmer 的广播逻辑（共享同一份 publish 代码路径的语义）。
+    #[tokio::test]
+    async fn confirmer_logic_roundtrip() {
+        let hub = ConfirmHub::new();
+        let (tx_events, mut rx_events) = broadcast::channel::<EventRec>(64);
+        let seq = std::sync::atomic::AtomicU64::new(0);
+
+        // 复刻 confirmer 的主体（与 Shared::confirmer 同逻辑，注入 hub/tx/seq）。
+        let hub2 = std::sync::Arc::new(hub);
+        let hub3 = hub2.clone();
+        let tx2 = tx_events.clone();
+        let prompt = Prompt {
+            tool: "bash",
+            summary: "run: rm -rf /tmp/x".into(),
+        };
+        let handle = std::thread::spawn(move || {
+            let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+            let id = hub2.insert(tx);
+            let rec = EventRec {
+                seq: seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+                event: serde_json::json!({"kind":"confirm_req","confirm_id":id,
+                    "tool":prompt.tool,"summary":prompt.summary}),
+            };
+            let _ = tx2.send(rec);
+            let decision = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or(Decision::Deny);
+            hub2.remove(id);
+            (id, decision)
+        });
+
+        // 等 confirm_req 广播。
+        let rec = tokio::time::timeout(std::time::Duration::from_secs(5), rx_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.event["kind"], "confirm_req");
+        let cid = rec.event["confirm_id"].as_u64().unwrap();
+        assert_eq!(rec.event["tool"], "bash");
+
+        // approve 路由。
+        assert!(hub3.resolve(cid, Decision::Allow));
+        let (id2, decision) = handle.join().unwrap();
+        assert_eq!(id2, cid);
+        assert_eq!(decision, Decision::Allow);
     }
 }
