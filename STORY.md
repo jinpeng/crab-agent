@@ -22,7 +22,7 @@ tool loop:
 - **Local observability**: versioned session log, `crab trace` (span tree),
   `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-393 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+395 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -99,11 +99,11 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 
 | | |
 |---|---|
-| Lines of Rust | ~18,200 |
-| Tests | 393 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
+| Lines of Rust | ~18,500 |
+| Tests | 395 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
 | Binary (release) | ~12 MiB |
 | Cold start | ~5 ms `crab --version` (vs ~150 ms for pi 1.3.0, measured on the same machine) |
-| Commits | 214 |
+| Commits | 218 |
 | Commits authored by crab | 21 |
 
 ## Design
@@ -114,8 +114,15 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.5.0. It works, it self-builds, and it's published. The honest label is "early but
+v0.5.1. It works, it self-builds, and it's published. The honest label is "early but
 real": the core loop, tools, config, MCP, memory, and TUI are solid and tested.
+v0.5.1 fixes the slash-command UX found by dogfooding `/reflect`: `/compact` and
+`/reflect` used to run with zero visual feedback and no way to interrupt, so on a
+slow LLM they looked frozen. They now enter a `Working` state at dispatch (spinner,
+greyed input box), lock Enter for everything except `/quit` (input text preserved),
+cancel on Esc, and `/quit` exits immediately even mid-LLM — `handle_command` races
+the operation against the command channel, and dropping the future cancels the
+HTTP call. Mid-run input queueing (agent `Streaming`) is untouched.
 v0.5.0 adds **lesson memory** (design:
 `docs/notes/2026-11-03-crab-memory-minimal-design.md`, built from surveys of
 pi/DeepSeek-harness, Codex/Claude Code, and eight open-source memory systems).
