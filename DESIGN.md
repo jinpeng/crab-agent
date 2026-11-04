@@ -298,3 +298,41 @@ agent 的实际质量住在 system prompt 和工具描述里。如果 crab 用�
 | tempfile | 3.27.0 | 测试临时目录 |
 
 **已评估并排除**：`rig-core` 0.44.0（拿走 loop）、`rquickjs` 0.14.0 / `wasmtime` 49.0.2（插件运行时）、`tiktoken-rs` 0.12.1（体积 + 对非 OpenAI 模型不准）。
+
+---
+
+## 已执行的架构决策：serve 从 WebSocket 推送翻转为拉取（2026-11-04）
+
+`crab serve` 最初用 JSONL-over-WebSocket 推送事件。真机（iPhone Safari，
+局域网）验证暴露 ws 推送路径的结构性问题，三个独立 bug 链：手写 101 被
+iOS Safari 拒、`send().await` 被 Safari 背压/节流卡死饿死后续 confirm_req、
+confirmer 里 `tokio::spawn`（同步闭包）静默失败。
+
+**决策：翻转为拉取式架构（Kafka 风格），彻底删除 WebSocket。**
+事件以统一 EntryId 追加进内存日志（真相源，offset 即 EntryId，已验证单调
+连续）；客户端长轮询 `GET /events?after_id=N` 并自记 offset（localStorage），
+断线重连从自己的 offset 续拉；控制命令走 `POST /cmd`；审批是 pending 状态
+快照（非事件回放）。服务端无状态于客户端进度。
+
+**为什么这比推送可靠**：ws 的不可靠源于**协议复杂性**（升级握手、帧协议、
+Safari 背压怪癖）叠加**推送语义**（服务端要跟踪每个客户端的推送进度）。
+长轮询把传输降级为普通 HTTP（无握手、无帧、Safari 兼容性好得多），把进度
+跟踪翻转到客户端。代价是每客户端一个常驻连接 + 网络切换需重连——可接受。
+
+**真机调试抓出的两个隐蔽根因**（拉取架构本身也要修）：
+1. `Notify::notify_waiters()` 在"检查日志"与"进入 await"的窗口丢失 →
+   用 `Notified::enable()` 先注册 interest 再检查。
+2. **confirmer 的 `std::sync::mpsc::recv()` 阻塞 tokio worker 线程**，导致该
+   worker 上长轮询 task 的 notify wakeup 排队无法被 poll——这是审批卡片
+   延迟 30s+ 的最终根因（turn_started 毫秒级因为 confirmer 尚未阻塞，
+   confirm_req 一进 confirmer 阻塞就卡死后续 wakeup）。修法：
+   `tokio::task::block_in_place` 让 tokio 把阻塞 worker 上的其他 task 迁走。
+   修复后 confirm_req 发布到长轮询唤醒 = 1ms。
+
+**教训**：① 移动端推送的坑在协议细节，不在概念；② tokio 里同步阻塞调用
+必须 `block_in_place` 或 `spawn_blocking`，否则会隐蔽地饿死同 worker 的
+其他 task——这在 multi-thread runtime 下也会发生（work-stealing 只在 poll
+点发生）；③ 架构级翻转（推→拉）要用**确定性验收脚本**（
+`scripts/serve_pull_acceptance.sh`：3 客户端 × 连续无丢事件序列）作试金石，
+防"换了架构还是不行"的误诊。完整设计与 grilling 决策记录见
+docs/notes/2026-11-04-crab-serve-pull-architecture.md。
