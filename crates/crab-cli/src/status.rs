@@ -16,6 +16,10 @@ pub enum RunState {
     Idle,
     /// Streaming an assistant response.
     Streaming,
+    /// A slash command (/compact, /reflect) is executing. Distinct from
+    /// Streaming so the TUI can lock command submission (except /quit)
+    /// without breaking mid-run input queueing.
+    Working,
     /// Running a tool call.
     WaitingTool,
     /// Blocked on a user confirmation prompt.
@@ -28,6 +32,7 @@ impl RunState {
         match self {
             RunState::Idle => "idle",
             RunState::Streaming => "streaming",
+            RunState::Working => "working",
             RunState::WaitingTool => "tool",
             RunState::WaitingConfirm => "confirm",
         }

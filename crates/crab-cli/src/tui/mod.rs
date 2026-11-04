@@ -223,6 +223,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
                                     other => {
                                         handle_command(
                                             other, &mut agent, &gate, &config, &ui_tx, &err_tx,
+                                            &mut cmd_rx,
                                         )
                                         .await;
                                     }
@@ -231,7 +232,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
                         }
                     }
                     other => {
-                        if handle_command(other, &mut agent, &gate, &config, &ui_tx, &err_tx).await
+                        if handle_command(other, &mut agent, &gate, &config, &ui_tx, &err_tx, &mut cmd_rx).await
                         {
                             break;
                         }
@@ -248,6 +249,9 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     }
 
     // Cleanup
+    if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+        eprintln!("[dbg] async: outer loop broken, cleaning up");
+    }
     forward_handle.abort();
     let _ = forward_handle.await;
     // Reap the MCP children while the runtime is alive (plain drop leaks them —
@@ -317,6 +321,10 @@ enum UiEvent {
     BranchChanged(Option<String>),
     /// A notice produced by the async side (e.g. "nothing to compact").
     Notice(String),
+    /// A long-running slash command (/compact, /reflect) finished. TUI set
+    /// Streaming at dispatch for immediate feedback; this restores Idle
+    /// (unless a confirm modal or a real run owns the state now).
+    CommandDone,
 }
 
 /// Execute one non-Submit command. Returns true when the TUI should quit.
@@ -328,6 +336,7 @@ async fn handle_command(
     config: &crab_core::config::Config,
     ui_tx: &std::sync::mpsc::Sender<UiEvent>,
     err_tx: &std::sync::mpsc::Sender<UiEvent>,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<UiCommand>,
 ) -> bool {
     match cmd {
         UiCommand::Abort => {
@@ -381,15 +390,56 @@ async fn handle_command(
             false
         }
         UiCommand::Compact => {
-            let report = agent.compact_now().await;
+            let op = agent.compact_now();
+            tokio::pin!(op);
+            // 与 Quit/Abort 竞争：/quit 立即退出（drop future 取消 LLM 调用），
+            // Esc 取消本次压缩。其他命令 TUI 侧已锁定，不会到达。
+            let report = tokio::select! {
+                r = &mut op => Some(r),
+                cmd = cmd_rx.recv() => {
+                    if matches!(cmd, Some(UiCommand::Quit)) {
+                        return true;
+                    }
+                    None
+                }
+            };
+            let Some(report) = report else {
+                let _ = ui_tx.send(UiEvent::Notice("compact cancelled".into()));
+                let _ = ui_tx.send(UiEvent::CommandDone);
+                return false;
+            };
             if report.turns_affected == 0 {
                 let _ = ui_tx.send(UiEvent::Notice("nothing to compact".into()));
             }
             // 非零情况由 AgentEvent::Compacted 处理器统一通知
+            let _ = ui_tx.send(UiEvent::CommandDone);
             false
         }
         UiCommand::Reflect => {
-            match agent.propose_lessons().await {
+            if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                eprintln!("[dbg] /reflect: handler entered");
+            }
+            // 块作用域让 future 在 select 后立即 drop——否则它对 agent 的
+            // 不可变借用会挡住后面 append_lesson 的可变借用。
+            let result = {
+                let op = agent.propose_lessons();
+                tokio::pin!(op);
+                tokio::select! {
+                    r = &mut op => Some(r),
+                    cmd = cmd_rx.recv() => {
+                        if matches!(cmd, Some(UiCommand::Quit)) {
+                            return true;
+                        }
+                        None
+                    }
+                }
+            };
+            let Some(result) = result else {
+                let _ = ui_tx.send(UiEvent::Notice("reflect cancelled".into()));
+                let _ = ui_tx.send(UiEvent::CommandDone);
+                return false;
+            };
+            match result {
                 Ok(proposals) if proposals.is_empty() => {
                     let _ = ui_tx.send(UiEvent::Notice(
                         "nothing to reflect on (empty transcript or no lessons proposed)".into(),
@@ -400,6 +450,9 @@ async fn handle_command(
                     let mut accepted = 0usize;
                     let mut accept_rest = false;
                     for (kind, text) in proposals {
+                        if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                            eprintln!("[dbg] /reflect: asking gate for [{kind}] {text}");
+                        }
                         if !accept_rest {
                             // gate.ask 不碰 allow_all 闩：[a]ll 在这里的意思是
                             // "接受全部剩余提议"，绝不变成会话级自动放行。
@@ -416,6 +469,9 @@ async fn handle_command(
                             accepted += 1;
                         }
                     }
+                    if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                        eprintln!("[dbg] /reflect: done, {accepted}/{total}");
+                    }
                     let _ = ui_tx.send(UiEvent::Notice(format!(
                         "remembered {accepted} lesson(s), skipped {}",
                         total - accepted
@@ -425,6 +481,7 @@ async fn handle_command(
                     let _ = err_tx.send(UiEvent::Error(format!("/reflect failed: {e}")));
                 }
             }
+            let _ = ui_tx.send(UiEvent::CommandDone);
             false
         }
         UiCommand::Submit(_) => false, // handled by the caller
@@ -461,7 +518,15 @@ fn run_tui_loop(
             match ev {
                 UiEvent::Agent(ae) => state.apply_agent_event(ae),
                 UiEvent::Error(msg) => state.show_error(msg),
-                UiEvent::Confirm { prompt, reply } => state.begin_confirm(prompt, reply),
+                UiEvent::Confirm { prompt, reply } => {
+                    if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                        eprintln!(
+                            "[dbg] confirm modal shown: {} — {}",
+                            prompt.tool, prompt.summary
+                        );
+                    }
+                    state.begin_confirm(prompt, reply)
+                }
                 UiEvent::YoloChanged(on) => {
                     state.yolo = on;
                     state.notice(if on {
@@ -477,10 +542,20 @@ fn run_tui_loop(
                 }
                 UiEvent::BranchChanged(branch) => state.status.set_branch(branch),
                 UiEvent::Notice(msg) => state.notice(msg),
+                UiEvent::CommandDone => {
+                    // /reflect 可能弹过 confirm（WaitingConfirm）；若 modal 还在
+                    // 就不动——状态归 modal 所有。只在 Working 时恢复 Idle。
+                    if state.run_state == crate::status::RunState::Working {
+                        state.set_run_state(crate::status::RunState::Idle);
+                    }
+                }
             }
         }
 
         if state.should_quit {
+            if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                eprintln!("[dbg] tui: should_quit -> returning");
+            }
             return Ok(());
         }
     }
@@ -665,6 +740,15 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
                 state.input.insert_char('\n');
                 return None;
             }
+            // slash 命令执行中（Working）：锁定提交——字符仍可输入，但 Enter
+            // 不执行任何命令，/quit 系除外（退出永远即时）。agent run 的
+            // mid-run 排队语义（Streaming）不受影响。
+            if state.run_state == crate::status::RunState::Working {
+                let t = state.input.text().trim();
+                if !matches!(t, "/quit" | "/q" | "/exit") {
+                    return None;
+                }
+            }
             // Enter: submit
             let text = state.input.take();
             let trimmed = text.trim();
@@ -782,9 +866,19 @@ fn dispatch_slash(
             let _ = cmd_tx.blocking_send(UiCommand::Update);
         }
         state::SlashCommand::Compact => {
+            if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                eprintln!("[dbg] /compact: sending UiCommand::Compact");
+            }
+            // 立即反馈：spinner + 灰化输入框，避免"没反应"的错觉。
+            // 不吞键——后续命令照常排队，/quit 仍能即时退出。
+            state.set_run_state(crate::status::RunState::Working);
             let _ = cmd_tx.blocking_send(UiCommand::Compact);
         }
         state::SlashCommand::Reflect => {
+            if std::env::var("CRAB_DEBUG_CMD").is_ok() {
+                eprintln!("[dbg] /reflect: sending UiCommand::Reflect");
+            }
+            state.set_run_state(crate::status::RunState::Working);
             let _ = cmd_tx.blocking_send(UiCommand::Reflect);
         }
         state::SlashCommand::Unknown(name) => {
@@ -890,6 +984,69 @@ mod tests {
         drop(tx);
         handle.await.unwrap();
     }
+    #[test]
+    fn slash_commands_enter_working_state_and_quit_still_exits() {
+        use crate::status::RunState;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        // /reflect 和 /compact 立即进入 Working（spinner + 输入框灰化）。
+        for cmd in ["/reflect", "/compact"] {
+            s.run_state = RunState::Idle;
+            s.input.insert_str(cmd);
+            let action = handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut s);
+            let Some(Action::Slash(sc)) = action else {
+                panic!("{cmd}: expected slash action, got {action:?}");
+            };
+            dispatch_slash(sc, &mut s, &tx, &[], &[]);
+            assert_eq!(
+                s.run_state,
+                RunState::Working,
+                "{cmd}: must enter working state immediately"
+            );
+            // 命令已排队，TUI 不吞键。
+            assert!(rx.try_recv().is_ok(), "{cmd}: command must be queued");
+        }
+        // Working 中其他命令的 Enter 被吞（不提交、输入保留）。
+        s.input.insert_str("/compact");
+        assert_eq!(handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut s), None);
+        assert_eq!(
+            s.input.text(),
+            "/compact",
+            "input is preserved, not submitted"
+        );
+        // /quit 在 Working 状态仍然即时退出（TUI 侧 return true，不等 handler）。
+        s.input.take();
+        s.input.insert_str("/quit");
+        let Some(Action::Slash(state::SlashCommand::Quit)) =
+            handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut s)
+        else {
+            panic!("quit must still dispatch while working");
+        };
+    }
+
+    #[test]
+    fn command_done_restores_idle_but_not_during_confirm() {
+        use crate::status::RunState;
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        // Working → Idle
+        s.run_state = RunState::Working;
+        if s.run_state == RunState::Working {
+            s.set_run_state(RunState::Idle);
+        }
+        assert_eq!(s.run_state, RunState::Idle);
+        // confirm 进行中不被 CommandDone 覆盖
+        let (reply, _) = std::sync::mpsc::channel();
+        s.begin_confirm(
+            crab_core::gate::Prompt {
+                tool: "memory",
+                summary: "x".into(),
+            },
+            reply,
+        );
+        assert_eq!(s.run_state, RunState::WaitingConfirm);
+        assert!(s.confirm.is_some());
+    }
+
     #[test]
     fn esc_aborts_a_running_turn() {
         use crate::status::RunState;

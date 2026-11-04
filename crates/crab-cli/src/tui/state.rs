@@ -514,7 +514,7 @@ impl TuiState {
     }
 
     /// Update the run state and keep the status line in sync.
-    fn set_run_state(&mut self, state: RunState) {
+    pub(crate) fn set_run_state(&mut self, state: RunState) {
         // Start the clock on the idle → busy edge; stop it when back to idle.
         match (self.run_state, state) {
             (RunState::Idle, s) if s != RunState::Idle => {
