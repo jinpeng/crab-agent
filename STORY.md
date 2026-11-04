@@ -22,7 +22,7 @@ tool loop:
 - **Local observability**: versioned session log, `crab trace` (span tree),
   `crab metrics` (tokens, cost, latency) with versioned per-model pricing
 
-395 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
+400 tests. Apache-2.0. [Releases](https://github.com/jinpeng/crab-agent/releases) ship
 precompiled binaries for macOS (arm64) and Linux (x86_64, arm64).
 
 ## The self-hosting arc
@@ -114,8 +114,22 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.5.1. It works, it self-builds, and it's published. The honest label is "early but
+v0.6.0. It works, it self-builds, and it's published. The honest label is "early but
 real": the core loop, tools, config, MCP, memory, and TUI are solid and tested.
+v0.6.0 adds **`crab serve`** — a remote-control daemon for driving the agent from a
+phone. It runs an HTTPS server on a LAN/tailnet interface (self-signed cert, TOFU
+fingerprint), serves an installable PWA, and exposes the full control surface:
+observe the run live, approve/deny permission prompts, abort, prompt, mid-run steer,
+compact, reflect, and switch among multiple registered workspaces. The transport is a
+**pull-based architecture** (Kafka-style): events are appended to an in-memory log
+with a monotonic offset, clients long-poll `GET /events?after_id=N` tracking their own
+offset, and the server is stateless about client progress. This replaced an earlier
+WebSocket push design after real-device verification exposed ws protocol fragility on
+mobile Safari — the flip, and the two latent tokio bugs it surfaced (a lossy
+`notify_waiters` window; a confirmer blocking a worker thread and starving the long
+poll, fixed with `block_in_place`), are recorded in DESIGN.md and
+docs/notes/2026-11-04-crab-serve-pull-architecture.md. Approval cards pop in ~1ms on
+a real iPhone over LAN.
 v0.5.1 fixes the slash-command UX found by dogfooding `/reflect`: `/compact` and
 `/reflect` used to run with zero visual feedback and no way to interrupt, so on a
 slow LLM they looked frozen. They now enter a `Working` state at dispatch (spinner,
