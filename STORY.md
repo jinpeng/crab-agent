@@ -99,11 +99,11 @@ fuzzy ones. The human's job shifted from writing to *specifying crisply and revi
 
 | | |
 |---|---|
-| Lines of Rust | ~18,500 |
-| Tests | 395 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
-| Binary (release) | ~12 MiB |
+| Lines of Rust | ~19,900 |
+| Tests | 400 (3 ignored: two timing-sensitive self-spawn round trips, one subprocess helper) |
+| Binary (release) | ~16 MiB (Linux, lto=thin + strip) |
 | Cold start | ~5 ms `crab --version` (vs ~150 ms for pi 1.3.0, measured on the same machine) |
-| Commits | 218 |
+| Commits | 234 |
 | Commits authored by crab | 21 |
 
 ## Design
@@ -114,7 +114,16 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.6.0. It works, it self-builds, and it's published. The honest label is "early but
+v0.6.1. It works, it self-builds, and it's published.
+
+v0.6.1 is a reliability patch: it fixes a race in `Agent::run`'s teardown where
+`stream-forward` task was aborted while provider deltas were still buffered — with
+an instant provider (mock) the whole run could finish before the forward task was
+ever polled, and the abort dropped the final `TextDelta`s on the floor (flaky
+empty stdout in `--print` mode, caught by CI). The fix closes the channel and lets
+the forward task drain to `RecvError::Closed` instead of aborting it. CI's release
+size budget was also recalibrated to the measured 16.4 MiB (was a too-tight
+estimate) and a workflow YAML parsing warning fixed. The honest label is "early but
 real": the core loop, tools, config, MCP, memory, and TUI are solid and tested.
 v0.6.0 adds **`crab serve`** — a remote-control daemon for driving the agent from a
 phone. It runs an HTTPS server on a LAN/tailnet interface (self-signed cert, TOFU
