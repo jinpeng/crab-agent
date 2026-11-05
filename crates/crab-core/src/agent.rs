@@ -563,8 +563,13 @@ impl Agent {
             });
         }
         // Ensure all deltas forwarded before returning, then stop the task.
+        // No abort: run_inner only borrows stream_tx (no clone outlives it), so
+        // dropping it closes the channel and the forward task drains every
+        // buffered delta, then exits on RecvError::Closed. Aborting here races
+        // the scheduler — with an instant provider (mock) the whole run can
+        // complete before the forward task is ever polled, and abort() then
+        // drops it with deltas still buffered (flaky empty stdout in --print).
         drop(stream_tx);
-        forward.abort();
         let _ = forward.await;
         // Reset the abort token for the next run: CancellationToken::cancel() is
         // permanent, so without this a single Ctrl-C would make every subsequent
