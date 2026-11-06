@@ -32,6 +32,11 @@ pub enum Bubble {
         name: String,
         args: String,
         result: Option<ToolResult>,
+        /// User-initiated `!` shell bubble: show the FULL output (capped at
+        /// [`SHELL_BUBBLE_MAX_LINES`]) instead of the agent-tool 5-line peek —
+        /// the user ran the command to see its output, and a silent cut hid
+        /// exactly the lines they cared about (e.g. `modified: README.md`).
+        full: bool,
     },
     /// System notice (e.g., "[aborted]").
     System(String),
@@ -587,6 +592,7 @@ impl TuiState {
                 is_error,
                 truncated: 0,
             }),
+            full: true,
         });
         self.scroll.scroll_to_bottom();
     }
@@ -726,6 +732,7 @@ impl TuiState {
                             name: name.clone(),
                             args: format!("{name} {args_str}"),
                             result: None,
+                            full: false,
                         });
                     }
                 }
@@ -980,6 +987,7 @@ impl TuiState {
                     name,
                     args,
                     result: None,
+                    full: false,
                 });
                 if self.scroll.follow {
                     self.scroll.offset = 0;
@@ -1089,6 +1097,13 @@ fn truncate_result(s: &str) -> (String, usize) {
     }
 }
 
+/// Agent-driven tool bubbles show this many result lines in the transcript —
+/// a peek, not the full output (the LLM already consumed the whole thing).
+const AGENT_BUBBLE_MAX_LINES: usize = 5;
+/// User-typed `!` shell bubbles show this many lines: generous, but a runaway
+/// command must not push the whole transcript out of the scrollback.
+const SHELL_BUBBLE_MAX_LINES: usize = 50;
+
 impl Bubble {
     /// Render bubble as styled text for the transcript.
     pub fn to_text(&self, _width: usize) -> Text<'static> {
@@ -1113,7 +1128,7 @@ impl Bubble {
                 Text::from(lines)
             }
             Bubble::Tool {
-                name, args, result, ..
+                name, args, result, full, ..
             } => {
                 let mut lines = vec![Line::from(vec![
                     Span::styled("● ", Theme::tool_name()),
@@ -1129,12 +1144,18 @@ impl Bubble {
                     } else {
                         Theme::success()
                     };
-                    let result_text = if r.truncated > 0 {
-                        format!("{} (+ {} more lines)", r.text, r.truncated)
+                    // Agent tools get a 5-line peek to keep the transcript tidy;
+                    // user-typed `!` shell bubbles show everything (with a
+                    // generous cap) — a silent cut there hides the answer the
+                    // user ran the command for.
+                    let cap = if *full {
+                        SHELL_BUBBLE_MAX_LINES
                     } else {
-                        r.text.clone()
+                        AGENT_BUBBLE_MAX_LINES
                     };
-                    for (i, line) in result_text.lines().take(5).enumerate() {
+                    let all: Vec<&str> = r.text.lines().collect();
+                    let shown = all.len().min(cap);
+                    for (i, line) in all.iter().take(shown).enumerate() {
                         // Marker on the first line only; continuations align under it.
                         let prefix = if i == 0 {
                             format!("  {marker} ")
@@ -1143,8 +1164,18 @@ impl Bubble {
                         };
                         lines.push(Line::from(vec![
                             Span::styled(prefix, style),
-                            Span::styled(line.to_string(), Theme::dim()),
+                            Span::styled((*line).to_string(), Theme::dim()),
                         ]));
+                    }
+                    // The hidden-line notice is its OWN row, after the cap —
+                    // appending it to the text before `.take(5)` used to put it
+                    // past the cap, so agent bubbles silently swallowed it.
+                    let hidden = all.len() - shown + r.truncated;
+                    if hidden > 0 {
+                        lines.push(Line::from(vec![Span::styled(
+                            format!("    … {hidden} more line(s)"),
+                            Theme::dim(),
+                        )]));
                     }
                 }
                 Text::from(lines)
@@ -1452,6 +1483,41 @@ mod tests {
         };
         assert!(r.is_error);
         assert_eq!(r.text, "no such file");
+    }
+
+    #[test]
+    fn shell_bubble_shows_full_output_agent_bubble_peeks_with_working_notice() {
+        // 用户敲的 `!` 命令：10 行输出必须全部可见——静默截断曾把
+        // `modified: README.md` 这类关键行藏掉（用户报告的 bug）。
+        let mut state = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
+        let ten: String = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        state.push_shell_result("git status", ten.clone(), false);
+        let text = state.bubbles[0].to_text(80);
+        assert_eq!(text.lines.len(), 11, "header + all 10 output lines: {text:?}");
+        for i in 1..=10 {
+            assert!(
+                text.lines.iter().any(|l| l.spans.iter().any(|s| s.content == format!("line{i}"))),
+                "line{i} must be visible"
+            );
+        }
+
+        // agent 工具气泡：保持 5 行速览，且超过的行数有独立的提示行
+        // （提示曾经是拼进文本再 take(5)，落在截断线之后 = 永不显示）。
+        let agent = Bubble::Tool {
+            id: "t1".into(),
+            name: "bash".into(),
+            args: "run".into(),
+            result: Some(ToolResult {
+                text: ten,
+                is_error: false,
+                truncated: 7,
+            }),
+            full: false,
+        };
+        let text = agent.to_text(80);
+        assert_eq!(text.lines.len(), 7, "header + 5 peek + 1 notice: {text:?}");
+        let notice = text.lines[6].spans.iter().map(|s| s.content.to_string()).collect::<String>();
+        assert!(notice.contains("12 more line(s)"), "5 cap-hidden + 7 truncated: {notice}");
     }
 
     #[test]
