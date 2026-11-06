@@ -114,7 +114,15 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.6.1. It works, it self-builds, and it's published.
+v0.6.2. It works, it self-builds, and it's published.
+
+v0.6.2 fixes a silent metering hole on non-DeepSeek providers: the OpenAI-compatible
+request body set `stream: true` but never `stream_options.include_usage: true`, so
+providers that follow the spec strictly (Kimi among them) return no `usage` chunk in
+their streaming response — the status line showed `↑0 ↓0` and no cost for the whole
+session. DeepSeek returns usage unprompted, which had masked the bug. Now every
+streaming request asks for usage, so token counts, cache segments, and `$` cost
+populate on Kimi, OpenAI, and any other spec-conformant endpoint.
 
 v0.6.1 is a reliability patch: it fixes a race in `Agent::run`'s teardown where
 `stream-forward` task was aborted while provider deltas were still buffered — with

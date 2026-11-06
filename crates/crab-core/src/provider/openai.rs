@@ -45,6 +45,9 @@ impl OpenAiProvider {
             "model": self.model,
             "messages": msgs,
             "stream": true,
+            // 不请求这个字段时多数兼容端点（Kimi 等）在流式响应里不返回
+            // usage，token 计数与费用会全部落空；DeepSeek 不请求也返回。
+            "stream_options": { "include_usage": true },
         });
         if !tools.is_empty() {
             // OpenAI tool schema: {"type":"function","function":{...}}.
