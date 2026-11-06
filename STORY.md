@@ -114,7 +114,18 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.6.3. It works, it self-builds, and it's published.
+v0.6.4. It works, it self-builds, and it's published.
+
+v0.6.4 fixes a silent truncation in the transcript that made `!` shell output
+look wrong: every tool bubble rendered only the first 5 lines of its result,
+and the "(+ N more lines)" notice — concatenated into the text before the
+`.take(5)` — landed past the cap and never displayed. `!git status` therefore
+showed the header lines while silently swallowing `modified: README.md`, the
+very line the command was run for (user-reported, screenshot-confirmed). Now
+user-typed `!` shell bubbles render their full output (capped at 50 lines so a
+runaway command can't evict the transcript), agent tool bubbles keep the tidy
+5-line peek, and the hidden-line count renders as its own row — which also
+repairs the same never-visible notice for agent tool results.
 
 v0.6.3 adds two input-box quality-of-life features. A line starting with `!`
 turns the box green (border, prompt, and text) and runs as a local shell
