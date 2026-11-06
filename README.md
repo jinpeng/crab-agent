@@ -81,9 +81,13 @@ crab
 
 The prompt is `crab> `. Type `/` to browse slash commands with descriptions
 (↑↓ to choose, Enter to complete, Esc to dismiss — after `/model ` and
-`/skill:` the hint completes arguments too). The transcript supports
-pi-style copy: drag to select, release to copy (pbcopy on macOS, OSC52
-elsewhere). Slash commands:
+`/skill:` the hint completes arguments too). ↑/↓ at the prompt recall
+previously submitted inputs (oldest-first with ↑; ↓ past the newest entry
+restores the draft you had typed). A line starting with `!` turns the input
+box green and runs as a local shell command on Enter — it never reaches the
+model; output lands in the transcript like a tool result. The transcript
+supports pi-style copy: drag to select, release to copy (pbcopy on macOS,
+OSC52 elsewhere). Slash commands:
 
 | command | effect |
 | --- | --- |

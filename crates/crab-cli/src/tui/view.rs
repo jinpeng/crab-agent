@@ -301,20 +301,32 @@ fn running_title(state: &TuiState) -> String {
 /// composition must never push the cursor out of the box.
 fn draw_input(f: &mut Frame, state: &TuiState, area: Rect) {
     let is_running = state.is_running();
+    // `!`-prefixed input is a local shell command: the whole box turns green so
+    // the mode is unmistakable before Enter runs anything.
+    let shell_mode = state.input.text().starts_with('!');
 
-    let style = if is_running {
+    let style = if shell_mode {
+        Style::default().fg(Color::Green)
+    } else if is_running {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
     };
 
-    let border_style = if is_running {
+    let border_style = if shell_mode {
+        Style::default().fg(Color::Green)
+    } else if is_running {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(Color::Blue)
     };
 
-    let layout = state.input.layout(area.width);
+    let prompt_color = if shell_mode {
+        Color::Green
+    } else {
+        Color::Blue
+    };
+    let layout = state.input.layout_with(area.width, prompt_color);
     let rows = layout.lines.len();
     let max_rows = (area.height as usize).saturating_sub(2);
     let start = if rows > max_rows {

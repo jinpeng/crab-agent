@@ -303,6 +303,9 @@ enum UiCommand {
     Compact,
     /// `/reflect`: distill lessons from this session, human-confirmed.
     Reflect,
+    /// Run one user-typed `!` shell command locally (no permission gate —
+    /// the user typed it themselves, like their own terminal).
+    Shell(String),
     /// `/update`: self-update a managed install (async; result as a notice).
     Update,
 }
@@ -325,6 +328,69 @@ enum UiEvent {
     /// Streaming at dispatch for immediate feedback; this restores Idle
     /// (unless a confirm modal or a real run owns the state now).
     CommandDone,
+    /// A `!` shell command finished; show its output in the transcript.
+    ShellDone {
+        command: String,
+        output: String,
+        is_error: bool,
+    },
+}
+
+/// Run one user-typed `!` shell command locally. No permission gate: the user
+/// typed it themselves, which is the same trust level as their own terminal.
+/// Output format mirrors the bash tool: head+tail truncation, [stderr], [exit N].
+async fn run_shell_command(cmd: &str) -> (String, bool) {
+    const TIMEOUT: Duration = Duration::from_secs(120);
+    const HEAD_BYTES: usize = 30_000;
+    const TAIL_BYTES: usize = 30_000;
+
+    fn truncate(s: &str) -> String {
+        if s.len() <= HEAD_BYTES + TAIL_BYTES {
+            return s.to_string();
+        }
+        // Snap both cuts to char boundaries: byte-slicing a multi-byte char panics.
+        let mut head_end = HEAD_BYTES;
+        while !s.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        let mut tail_start = s.len() - TAIL_BYTES;
+        while !s.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        format!(
+            "{}\n... [omitted {} bytes] ...\n{}",
+            &s[..head_end],
+            s.len() - head_end - (s.len() - tail_start),
+            &s[tail_start..]
+        )
+    }
+
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .kill_on_drop(true) // dropping the future kills the process (abort-safe)
+        .output();
+    match tokio::time::timeout(TIMEOUT, child).await {
+        Ok(Ok(out)) => {
+            let mut text = truncate(&String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                text.push_str("\n[stderr]\n");
+                text.push_str(&truncate(&String::from_utf8_lossy(&out.stderr)));
+            }
+            let code = out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into());
+            text.push_str(&format!("\n[exit {code}]"));
+            (text, !out.status.success())
+        }
+        Ok(Err(e)) => (format!("[spawn error: {e}]"), true),
+        Err(_) => (
+            format!("[timeout after {:?}: process killed]", TIMEOUT),
+            true,
+        ),
+    }
 }
 
 /// Execute one non-Submit command. Returns true when the TUI should quit.
@@ -373,6 +439,19 @@ async fn handle_command(
                     let _ = err_tx.send(UiEvent::Error(format!("/model {name}: {e}")));
                 }
             }
+            false
+        }
+        UiCommand::Shell(cmd) => {
+            // Off-loop like /update: a slow command must not freeze queued input.
+            let tx = ui_tx.clone();
+            tokio::spawn(async move {
+                let (output, is_error) = run_shell_command(&cmd).await;
+                let _ = tx.send(UiEvent::ShellDone {
+                    command: cmd,
+                    output,
+                    is_error,
+                });
+            });
             false
         }
         UiCommand::Update => {
@@ -542,6 +621,11 @@ fn run_tui_loop(
                 }
                 UiEvent::BranchChanged(branch) => state.status.set_branch(branch),
                 UiEvent::Notice(msg) => state.notice(msg),
+                UiEvent::ShellDone {
+                    command,
+                    output,
+                    is_error,
+                } => state.push_shell_result(&command, output, is_error),
                 UiEvent::CommandDone => {
                     // /reflect 可能弹过 confirm（WaitingConfirm）；若 modal 还在
                     // 就不动——状态归 modal 所有。只在 Working 时恢复 Idle。
@@ -591,6 +675,14 @@ fn handle_event(
                     state.push_user(&text);
                     let _ = cmd_tx.blocking_send(UiCommand::Submit(text));
                 }
+                Some(Action::Shell(cmd)) => {
+                    // Echo the command like a user message, but WITHOUT
+                    // push_user's run-state side effect — a local shell command
+                    // is not an agent run and must not grey out the input box.
+                    state.bubbles.push(state::Bubble::User(format!("!{cmd}")));
+                    state.scroll.scroll_to_bottom();
+                    let _ = cmd_tx.blocking_send(UiCommand::Shell(cmd));
+                }
                 Some(Action::Abort) => {
                     let _ = cmd_tx.blocking_send(UiCommand::Abort);
                 }
@@ -634,6 +726,8 @@ fn handle_event(
 #[derive(Debug, PartialEq)]
 enum Action {
     Submit(String),
+    /// A `!`-prefixed shell command to run locally.
+    Shell(String),
     Abort,
     Quit,
     /// A slash command to dispatch to the async handler.
@@ -737,6 +831,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
         Enter => {
             // Alt+Enter or Shift+Enter: insert newline (some terminals don't distinguish)
             if modifiers.contains(KeyModifiers::ALT) || modifiers.contains(KeyModifiers::SHIFT) {
+                state.cancel_history_browsing();
                 state.input.insert_char('\n');
                 return None;
             }
@@ -755,16 +850,30 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
             if trimmed.is_empty() {
                 return None;
             }
+            // `!`-prefix: local shell command, green box. Not a prompt —
+            // never reaches the model or the session log. A bare `!` is
+            // neither executed nor recorded.
+            if let Some(cmd) = trimmed.strip_prefix('!') {
+                let cmd = cmd.trim();
+                if cmd.is_empty() {
+                    return None;
+                }
+                state.record_history(trimmed);
+                return Some(Action::Shell(cmd.to_string()));
+            }
+            state.record_history(trimmed);
             if let Some(sc) = state::parse_slash(trimmed) {
                 return Some(Action::Slash(sc));
             }
             Some(Action::Submit(text))
         }
         Backspace => {
+            state.cancel_history_browsing();
             state.input.backspace();
             None
         }
         Delete => {
+            state.cancel_history_browsing();
             state.input.delete();
             None
         }
@@ -785,15 +894,24 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut TuiState) -> O
             None
         }
         Up => {
-            // TODO: command history
+            // History recall wins while there is anything to recall; with an
+            // empty history (or a picker-less, browsing-less idle box) ↑
+            // falls back to scrolling the transcript.
+            if state.history_prev() {
+                return None;
+            }
             state.scroll_up(1);
             None
         }
         Down => {
+            if state.history_next() {
+                return None;
+            }
             state.scroll_down(1);
             None
         }
         Char(c) => {
+            state.cancel_history_browsing();
             state.input.insert_char(c);
             None
         }
@@ -1087,6 +1205,90 @@ mod tests {
     /// /quit must end the TUI loop itself, not just the async command loop:
     /// the runtime waits for spawn_blocking tasks at shutdown, so a TUI loop
     /// left polling stdin would hang the process (the /quit freeze).
+    #[test]
+    fn bang_prefix_dispatches_shell_action() {
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.input.insert_str("!ls -la");
+        let action = handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut s);
+        assert_eq!(action, Some(Action::Shell("ls -la".into())));
+        assert!(s.input.is_empty(), "buffer consumed on submit");
+        assert_eq!(s.history, vec!["!ls -la".to_string()]);
+        // 提交也清掉浏览状态。
+        assert_eq!(s.hist_index, None);
+    }
+
+    #[test]
+    fn bare_bang_submits_nothing() {
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.input.insert_str("!");
+        assert_eq!(handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut s), None);
+        assert!(s.input.is_empty(), "consumed, not executed");
+        assert!(s.history.is_empty(), "an empty command is not history");
+    }
+
+    #[test]
+    fn up_recalls_history_newest_first_down_restores_draft() {
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.record_history("first prompt");
+        s.record_history("!echo hi");
+        // 空输入按 ↑：最新一条先进框。
+        assert!(handle_key(KeyCode::Up, KeyModifiers::NONE, &mut s).is_none());
+        assert_eq!(s.input.text(), "!echo hi");
+        // 再 ↑：更旧的一条。
+        assert!(handle_key(KeyCode::Up, KeyModifiers::NONE, &mut s).is_none());
+        assert_eq!(s.input.text(), "first prompt");
+        // 到顶后再 ↑ 不动。
+        assert!(handle_key(KeyCode::Up, KeyModifiers::NONE, &mut s).is_none());
+        assert_eq!(s.input.text(), "first prompt");
+        // ↓ 回到较新一条，再 ↓ 越界 → 恢复浏览前保存的草稿（空）。
+        assert!(handle_key(KeyCode::Down, KeyModifiers::NONE, &mut s).is_none());
+        assert_eq!(s.input.text(), "!echo hi");
+        assert!(handle_key(KeyCode::Down, KeyModifiers::NONE, &mut s).is_none());
+        assert_eq!(s.input.text(), "", "draft (empty) restored past the newest entry");
+        // 不再浏览时 ↓ 回落到滚动语义（返回值仍是 None，但没有 panic）。
+        assert!(handle_key(KeyCode::Down, KeyModifiers::NONE, &mut s).is_none());
+    }
+
+    #[test]
+    fn typing_while_browsing_cancels_recall() {
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.record_history("earlier");
+        s.input.insert_str("draft text");
+        handle_key(KeyCode::Up, KeyModifiers::NONE, &mut s);
+        assert_eq!(s.input.text(), "earlier");
+        // 编辑召回的内容：浏览结束，文本保留可改。
+        handle_key(KeyCode::Char('!'), KeyModifiers::NONE, &mut s);
+        assert_eq!(s.hist_index, None);
+        assert_eq!(s.input.text(), "earlier!");
+        // 再 ↑ 以当前文本为新草稿重新召回。
+        handle_key(KeyCode::Up, KeyModifiers::NONE, &mut s);
+        assert_eq!(s.input.text(), "earlier");
+        handle_key(KeyCode::Down, KeyModifiers::NONE, &mut s);
+        assert_eq!(s.input.text(), "earlier!");
+    }
+
+    #[test]
+    fn consecutive_duplicate_history_entries_collapse() {
+        let mut s = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
+        s.record_history("same");
+        s.record_history("same");
+        s.record_history("other");
+        s.record_history("same");
+        assert_eq!(s.history, vec!["same", "other", "same"]);
+    }
+
+    #[tokio::test]
+    async fn shell_command_captures_output_and_exit_code() {
+        let (out, failed) = run_shell_command("echo hello-crab").await;
+        assert!(out.contains("hello-crab"), "{out}");
+        assert!(!failed, "exit 0 is not an error: {out}");
+
+        let (out, failed) = run_shell_command("echo oops 1>&2; exit 3").await;
+        assert!(out.contains("oops"), "stderr captured: {out}");
+        assert!(out.contains("[exit 3]"), "exit code recorded: {out}");
+        assert!(failed, "non-zero exit is an error");
+    }
+
     #[test]
     fn slash_quit_sets_should_quit() {
         let mut state = state::TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);

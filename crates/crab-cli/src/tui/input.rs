@@ -196,6 +196,12 @@ impl InputBuffer {
     /// newline then still yields a row, and every cursor position maps to a
     /// visible cell.
     pub fn layout(&self, width: u16) -> InputLayout {
+        self.layout_with(width, Color::Blue)
+    }
+
+    /// Same as [`layout`](Self::layout), with the prompt-prefix color chosen by
+    /// the caller: the box turns green in shell mode (input starting with `!`).
+    pub fn layout_with(&self, width: u16, prompt_color: Color) -> InputLayout {
         let inner = width.saturating_sub(2) as usize; // borders
         let text_w = inner.saturating_sub(PREFIX_W).max(1);
 
@@ -207,7 +213,7 @@ impl InputBuffer {
         let mut line_start = 0usize;
         for (i, logical) in self.text.split('\n').enumerate() {
             let line_prefix = if i == 0 { PROMPT } else { CONTINUATION };
-            let prefix_style = Style::default().fg(Color::Blue);
+            let prefix_style = Style::default().fg(prompt_color);
             let wrapped = wrap_styled(&[Line::raw(logical.to_string())], text_w);
             for (j, row) in wrapped.iter().enumerate() {
                 // 折行续行用缩进对齐提示符文本，只有框内第一行显示 crab>。

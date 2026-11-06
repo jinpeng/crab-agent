@@ -454,6 +454,15 @@ pub struct TuiState {
     /// Input text whose hint the user dismissed with Esc; the hint stays
     /// hidden while the input is unchanged and returns when it changes.
     pub slash_dismissed: Option<String>,
+    /// Inputs submitted this session, oldest first (prompts and `!` shell lines).
+    /// In-memory only: recalling across restarts is a session-log concern, not this.
+    pub history: Vec<String>,
+    /// Position while browsing history; None = the live input is being edited.
+    pub hist_index: Option<usize>,
+    /// Draft saved when browsing began; restored when Down steps past the newest entry.
+    hist_draft: String,
+    /// Monotonic id source for local `!` shell bubbles.
+    shell_seq: u64,
     /// Provider profile names for `/model ` argument completion.
     pub model_names: Vec<String>,
     /// Discovered skills for `/skill:` argument completion.
@@ -490,9 +499,96 @@ impl TuiState {
             pricer: None,
             slash_hint: None,
             slash_dismissed: None,
+            history: Vec::new(),
+            hist_index: None,
+            hist_draft: String::new(),
+            shell_seq: 0,
             model_names: Vec::new(),
             skills: Vec::new(),
         }
+    }
+
+    /// Record a submitted line for ↑ recall. Browsing always resets; consecutive
+    /// duplicates collapse into one entry.
+    pub fn record_history(&mut self, text: &str) {
+        self.hist_index = None;
+        self.hist_draft.clear();
+        let t = text.trim();
+        if t.is_empty() || self.history.last().is_some_and(|l| l == t) {
+            return;
+        }
+        self.history.push(t.to_string());
+    }
+
+    /// Load the entry at `hist_index` (or the saved draft past the newest one)
+    /// into the input, cursor at end.
+    fn load_history_entry(&mut self) {
+        let text = match self.hist_index {
+            Some(i) if i < self.history.len() => self.history[i].clone(),
+            _ => self.hist_draft.clone(),
+        };
+        self.input.clear();
+        self.input.insert_str(&text);
+        self.input.move_end();
+    }
+
+    /// ↑: step back through history. Returns false when there is nothing to
+    /// recall — the caller falls back to scrolling the transcript.
+    pub fn history_prev(&mut self) -> bool {
+        if self.history.is_empty() {
+            return false;
+        }
+        match self.hist_index {
+            None => {
+                // First recall: whatever is in the box is a draft, kept for Down.
+                self.hist_draft = self.input.text().to_string();
+                self.hist_index = Some(self.history.len() - 1);
+            }
+            Some(0) => {} // oldest entry: stay put
+            Some(i) => self.hist_index = Some(i - 1),
+        }
+        self.load_history_entry();
+        true
+    }
+
+    /// ↓: step forward; past the newest entry the saved draft comes back.
+    /// Returns false when not browsing — the caller scrolls the transcript.
+    pub fn history_next(&mut self) -> bool {
+        if self.hist_index.is_none() {
+            return false;
+        }
+        let i = self.hist_index.unwrap_or(0);
+        self.hist_index = if i + 1 >= self.history.len() {
+            None
+        } else {
+            Some(i + 1)
+        };
+        self.load_history_entry();
+        true
+    }
+
+    /// Any manual edit while browsing leaves browsing mode (the recalled text
+    /// stays in the box, editable); the next ↑ starts a fresh recall from it.
+    pub fn cancel_history_browsing(&mut self) {
+        self.hist_index = None;
+    }
+
+    /// Append the result of a user-typed `!` shell command to the transcript,
+    /// rendered like a tool bubble. Not part of the session log or the LLM
+    /// context — local echo only.
+    pub fn push_shell_result(&mut self, command: &str, output: String, is_error: bool) {
+        self.shell_seq += 1;
+        self.bubbles.push(Bubble::Tool {
+            id: format!("shell-{}", self.shell_seq),
+            name: "shell".into(),
+            args: command.to_string(),
+            result: Some(ToolResult {
+                text: output,
+                is_error,
+                truncated: 0,
+            }),
+        });
+        self.scroll.scroll_to_bottom();
     }
 
     /// Show a system notice in the transcript.

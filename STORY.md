@@ -114,7 +114,19 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.6.2. It works, it self-builds, and it's published.
+v0.6.3. It works, it self-builds, and it's published.
+
+v0.6.3 adds two input-box quality-of-life features. A line starting with `!`
+turns the box green (border, prompt, and text) and runs as a local shell
+command on Enter — the same trust level as the user's own terminal, so no
+permission gate; it never reaches the model or the session log, and its output
+lands in the transcript as a tool-style bubble (`● shell <cmd>` with ✓/✗ and
+`[exit N]`), produced by the same off-loop task pattern as `/update` so slow
+commands never freeze the input. ↑/↓ at the prompt recall previously
+submitted inputs: ↑ walks newest-to-oldest, ↓ past the newest entry restores
+the draft saved when browsing began, any manual edit leaves browsing mode
+while keeping the recalled text editable, consecutive duplicates collapse, and
+with nothing to recall ↑/↓ keep their old transcript-scrolling fallback.
 
 v0.6.2 fixes a silent metering hole on non-DeepSeek providers: the OpenAI-compatible
 request body set `stream: true` but never `stream_options.include_usage: true`, so
