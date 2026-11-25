@@ -65,10 +65,17 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     // Best-effort metrics sink (independent broadcast receiver).
     crate::spawn_metrics_sink(&mut agent, &provider);
 
-    // Provider profile names for the /model picker (sorted, mock last).
-    let mut model_names: Vec<String> = config.providers.keys().cloned().collect();
-    model_names.sort();
-    model_names.push("mock".to_string());
+    // Provider profiles for the /model picker and completion, as
+    // (profile name, model) pairs (sorted, mock last). The picker shows both
+    // so the actual model behind each profile is visible; SetModel and the
+    // completion insert only the name.
+    let mut model_options: Vec<(String, String)> = config
+        .providers
+        .iter()
+        .map(|(n, p)| (n.clone(), p.model.clone()))
+        .collect();
+    model_options.sort();
+    model_options.push(("mock".to_string(), "mock".to_string()));
 
     // Subscribe to agent events
     let agent_rx = agent.subscribe();
@@ -123,7 +130,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
     }
     state.pricer = Some(pricer);
     // Argument completion for the slash hint (/model, /skill:).
-    state.model_names = model_names.clone();
+    state.model_options = model_options.clone();
     state.skills = skills.clone();
     state.yolo = gate.is_permissive();
 
@@ -173,7 +180,7 @@ pub async fn run(cfg: &AppConfig, continue_: bool) -> Result<()> {
             ui_rx,
             tui_cmd_tx,
             tick_rate,
-            model_names,
+            model_options,
             skills,
         )
     });
@@ -575,7 +582,7 @@ fn run_tui_loop(
     ui_rx: std::sync::mpsc::Receiver<UiEvent>,
     cmd_tx: tokio::sync::mpsc::Sender<UiCommand>,
     tick_rate: Duration,
-    model_names: Vec<String>,
+    model_options: Vec<(String, String)>,
     skills: Vec<crab_core::skills::Skill>,
 ) -> Result<()> {
     loop {
@@ -586,7 +593,7 @@ fn run_tui_loop(
         // (mouse wheel, paste) costs one redraw instead of one per event.
         let mut ready = event::poll(tick_rate)?;
         while ready {
-            if handle_event(event::read()?, &mut state, &cmd_tx, &model_names, &skills) {
+            if handle_event(event::read()?, &mut state, &cmd_tx, &model_options, &skills) {
                 return Ok(());
             }
             ready = event::poll(Duration::ZERO)?;
@@ -653,7 +660,7 @@ fn handle_event(
     ev: Event,
     state: &mut TuiState,
     cmd_tx: &tokio::sync::mpsc::Sender<UiCommand>,
-    model_names: &[String],
+    model_options: &[(String, String)],
     skills: &[crab_core::skills::Skill],
 ) -> bool {
     match ev {
@@ -691,7 +698,7 @@ fn handle_event(
                     return true;
                 }
                 Some(Action::Slash(sc)) => {
-                    dispatch_slash(sc, state, cmd_tx, model_names, skills);
+                    dispatch_slash(sc, state, cmd_tx, model_options, skills);
                 }
                 None => {}
             }
@@ -925,7 +932,7 @@ fn dispatch_slash(
     sc: state::SlashCommand,
     state: &mut TuiState,
     cmd_tx: &tokio::sync::mpsc::Sender<UiCommand>,
-    model_names: &[String],
+    model_options: &[(String, String)],
     skills: &[crab_core::skills::Skill],
 ) {
     match sc {
@@ -947,14 +954,7 @@ fn dispatch_slash(
             state.notice("usage: /model <name>  — or /models to pick from a list");
         }
         state::SlashCommand::PickModel => {
-            let current = model_names
-                .iter()
-                .position(|n| state.provider_label.starts_with(n.as_str()))
-                .unwrap_or(0);
-            state.picker = Some(state::Picker::Model(state::ListPicker::new(
-                model_names.to_vec(),
-                current,
-            )));
+            state.picker = Some(state::model_picker(model_options, &state.provider_label));
         }
         state::SlashCommand::Skill(name, args) => {
             if name.is_empty() {
@@ -1033,8 +1033,8 @@ fn handle_picker_key(
                         state.input.insert_str(&line);
                     }
                 }
-                state::Picker::Model(l) => {
-                    if let Some(name) = l.selected_name().map(str::to_string) {
+                state::Picker::Model { list, names } => {
+                    if let Some(name) = names.get(list.selected).cloned() {
                         state.picker = None;
                         let _ = cmd_tx.blocking_send(UiCommand::SetModel(name));
                     }

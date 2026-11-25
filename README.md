@@ -94,7 +94,7 @@ OSC52 elsewhere). Slash commands:
 | `/quit` (or `/exit`, `/q`) | leave |
 | `/yolo` | toggle allow-all: auto-approve every tool call for the rest of the session |
 | `/model <name>` | switch to the named provider profile from `~/.crab/config.toml` |
-| `/models` | open a picker to choose a profile with ↑↓/Enter |
+| `/models` | open a picker to choose a profile with ↑↓/Enter (each row shows the model behind the profile) |
 | `/skill:<name> [args]` | inject a discovered skill's instructions as a user message |
 | `/skills` | open a picker listing discovered skills; fills `/skill:<name>` into the input |
 | `/compact` | compact the conversation now (shed old tool results; summarize if needed) |

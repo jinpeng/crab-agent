@@ -164,19 +164,21 @@ fn draw_slash_hint(f: &mut Frame, state: &TuiState, input_area: Rect) {
             )
         }
         super::state::HintKind::ModelArg(prefix) => {
-            let names: Vec<&String> = state
-                .model_names
+            let options: Vec<&(String, String)> = state
+                .model_options
                 .iter()
-                .filter(|n| n.starts_with(prefix.as_str()))
+                .filter(|(n, _)| n.starts_with(prefix.as_str()))
                 .collect();
-            if names.is_empty() {
+            if options.is_empty() {
                 return;
             }
             (
                 " models (↑↓, Enter, Esc) ",
-                names
+                options
                     .into_iter()
-                    .map(|n| Row::Arg(n.clone(), String::new()))
+                    // The model name is the point of the list — show it in the
+                    // description column (suppressed when it repeats the profile name).
+                    .map(|(n, m)| Row::Arg(n.clone(), if n == m { String::new() } else { m.clone() }))
                     .collect(),
             )
         }
@@ -404,7 +406,7 @@ fn draw_picker(f: &mut Frame, state: &TuiState) {
         None => return,
     };
     let title = match picker {
-        Picker::Model(_) => " Select model (↑↓/jk, Enter, Esc) ",
+        Picker::Model { .. } => " Select model (↑↓/jk, Enter, Esc) ",
         Picker::Skill { .. } => " Select skill (↑↓/jk, Enter, Esc) ",
     };
 
@@ -800,7 +802,10 @@ mod tests {
     #[test]
     fn slash_hint_lists_model_and_skill_args() {
         let mut s = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
-        s.model_names = vec!["deepseek".into(), "kimi".into()];
+        s.model_options = vec![
+            ("deepseek".into(), "deepseek-chat".into()),
+            ("kimi".into(), "moonshot-v1-8k".into()),
+        ];
         s.skills = vec![crab_core::skills::Skill {
             name: "tdd".into(),
             description: "red-green-refactor".into(),
@@ -818,6 +823,9 @@ mod tests {
         assert!(popup.contains("models"), "{popup:?}");
         assert!(popup.contains("deepseek"), "{popup:?}");
         assert!(popup.contains("kimi"), "{popup:?}");
+        // The model behind each profile must be visible, not just the name.
+        assert!(popup.contains("deepseek-chat"), "{popup:?}");
+        assert!(popup.contains("moonshot-v1-8k"), "{popup:?}");
 
         let mut s2 = TuiState::new("m".into(), std::path::PathBuf::from("/"), None, None);
         s2.skills = vec![crab_core::skills::Skill {

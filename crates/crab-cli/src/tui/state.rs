@@ -170,15 +170,17 @@ impl ListPicker {
     pub fn move_down(&mut self) {
         self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
     }
-
-    pub fn selected_name(&self) -> Option<&str> {
-        self.items.get(self.selected).map(String::as_str)
-    }
 }
 
 /// The active overlay picker: model profiles, or skills to load.
 pub enum Picker {
-    Model(ListPicker),
+    /// Model display items are "profile — model" so the actual model is
+    /// visible; `names` holds the plain profile names, indexed like `list`,
+    /// for the Enter action (`/model <name>` takes the profile name).
+    Model {
+        list: ListPicker,
+        names: Vec<String>,
+    },
     /// Skill display items are "name — description" (description truncated);
     /// `names` holds the plain names, indexed like `list`, for the Enter action.
     Skill {
@@ -190,28 +192,28 @@ pub enum Picker {
 impl Picker {
     pub fn items(&self) -> &[String] {
         match self {
-            Picker::Model(l) => &l.items,
+            Picker::Model { list, .. } => &list.items,
             Picker::Skill { list, .. } => &list.items,
         }
     }
 
     pub fn selected(&self) -> usize {
         match self {
-            Picker::Model(l) => l.selected,
+            Picker::Model { list, .. } => list.selected,
             Picker::Skill { list, .. } => list.selected,
         }
     }
 
     pub fn move_up(&mut self) {
         match self {
-            Picker::Model(l) => l.move_up(),
+            Picker::Model { list, .. } => list.move_up(),
             Picker::Skill { list, .. } => list.move_up(),
         }
     }
 
     pub fn move_down(&mut self) {
         match self {
-            Picker::Model(l) => l.move_down(),
+            Picker::Model { list, .. } => list.move_down(),
             Picker::Skill { list, .. } => list.move_down(),
         }
     }
@@ -396,6 +398,33 @@ pub fn skill_slash_line(name: &str) -> String {
     format!("/skill:{name} ")
 }
 
+/// Build the model picker overlay. `options` are (profile name, model) pairs;
+/// display items are "profile — model" so the actual model is visible (a bare
+/// profile name hides what Enter will switch to). `names` parallels the items
+/// for the Enter action. Preselects the profile the status line currently
+/// shows (its label is "provider/model").
+pub fn model_picker(options: &[(String, String)], current_label: &str) -> Picker {
+    let names: Vec<String> = options.iter().map(|(n, _)| n.clone()).collect();
+    let current = names
+        .iter()
+        .position(|n| current_label.starts_with(n.as_str()))
+        .unwrap_or(0);
+    let items: Vec<String> = options
+        .iter()
+        .map(|(n, m)| {
+            if n == m {
+                n.clone()
+            } else {
+                format!("{n} — {m}")
+            }
+        })
+        .collect();
+    Picker::Model {
+        list: ListPicker::new(items, current),
+        names,
+    }
+}
+
 /// Build the skill picker overlay. None when no skills are discovered.
 /// Display items are "name — description" (description truncated to 60 cells);
 /// `names` parallels the items for the Enter action.
@@ -468,8 +497,10 @@ pub struct TuiState {
     hist_draft: String,
     /// Monotonic id source for local `!` shell bubbles.
     shell_seq: u64,
-    /// Provider profile names for `/model ` argument completion.
-    pub model_names: Vec<String>,
+    /// Provider profiles as (name, model) pairs for `/model ` argument
+    /// completion: the name is what gets inserted, the model is shown in
+    /// the hint's description column.
+    pub model_options: Vec<(String, String)>,
     /// Discovered skills for `/skill:` argument completion.
     pub skills: Vec<crab_core::skills::Skill>,
 }
@@ -508,7 +539,7 @@ impl TuiState {
             hist_index: None,
             hist_draft: String::new(),
             shell_seq: 0,
-            model_names: Vec::new(),
+            model_options: Vec::new(),
             skills: Vec::new(),
         }
     }
@@ -806,10 +837,10 @@ impl TuiState {
                 .map(|c| c.completion.to_string())
                 .collect(),
             HintKind::ModelArg(prefix) => self
-                .model_names
+                .model_options
                 .iter()
-                .filter(|n| n.starts_with(prefix.as_str()))
-                .map(|n| format!("/model {n}"))
+                .filter(|(n, _)| n.starts_with(prefix.as_str()))
+                .map(|(n, _)| format!("/model {n}"))
                 .collect(),
             HintKind::SkillArg(prefix) => self
                 .skills
@@ -1281,7 +1312,10 @@ mod tests {
     #[test]
     fn slash_hint_completes_model_and_skill_args() {
         let mut s = TuiState::new("t/m".into(), std::path::PathBuf::new(), None, None);
-        s.model_names = vec!["deepseek".into(), "kimi".into()];
+        s.model_options = vec![
+            ("deepseek".into(), "deepseek-chat".into()),
+            ("kimi".into(), "moonshot-v1-8k".into()),
+        ];
         s.skills = vec![
             crab_core::skills::Skill {
                 name: "tdd".into(),
@@ -1827,24 +1861,51 @@ mod tests {
     }
 
     #[test]
-    fn model_picker_navigation() {
+    fn list_picker_navigation() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let mut p = ListPicker::new(items, 0);
-        assert_eq!(p.selected_name(), Some("a"));
+        assert_eq!(p.items[0], "a");
+        assert_eq!(p.selected, 0);
         p.move_down();
-        assert_eq!(p.selected_name(), Some("b"));
+        assert_eq!(p.selected, 1);
         p.move_down();
         p.move_down(); // clamps at end
-        assert_eq!(p.selected_name(), Some("c"));
+        assert_eq!(p.selected, 2);
         p.move_up();
-        assert_eq!(p.selected_name(), Some("b"));
+        assert_eq!(p.selected, 1);
     }
 
     #[test]
-    fn model_picker_selected_clamped_to_nonempty() {
+    fn list_picker_selected_clamped_to_nonempty() {
         let items = vec!["only".to_string()];
         let p = ListPicker::new(items, 99);
         assert_eq!(p.selected, 0);
-        assert_eq!(p.selected_name(), Some("only"));
+        assert_eq!(p.items[0], "only");
+    }
+
+    #[test]
+    fn model_picker_shows_model_and_selects_by_profile_name() {
+        let options = vec![
+            ("deepseek".to_string(), "deepseek-chat".to_string()),
+            ("kimi".to_string(), "moonshot-v1-8k".to_string()),
+            ("mock".to_string(), "mock".to_string()),
+        ];
+        let picker = model_picker(&options, "kimi/moonshot-v1-8k");
+        let Picker::Model { list, names } = &picker else {
+            panic!("must be a Model picker");
+        };
+        // Display items expose the model behind each profile; a profile whose
+        // model equals its name (mock) is not doubled.
+        assert_eq!(
+            list.items,
+            vec!["deepseek — deepseek-chat", "kimi — moonshot-v1-8k", "mock"]
+        );
+        // names stays the plain profile names, aligned with the items.
+        assert_eq!(names, &vec!["deepseek", "kimi", "mock"]);
+        // The current provider label preselects its profile.
+        assert_eq!(picker.selected(), 1);
+        // Unknown label falls back to the first entry.
+        let picker = model_picker(&options, "unknown/model");
+        assert_eq!(picker.selected(), 0);
     }
 }
