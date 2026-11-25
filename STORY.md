@@ -114,7 +114,15 @@ is in [DESIGN.md](DESIGN.md).
 
 ## Status
 
-v0.6.4. It works, it self-builds, and it's published.
+v0.6.5. It works, it self-builds, and it's published.
+
+v0.6.5 fixes an invisible-model bug in the `/model` flow: the `/models`
+picker and the `/model ` argument hint listed only provider profile names,
+so the model Enter would actually switch to never appeared on screen. Picker
+rows now render "profile — model" (plain names kept alongside for the
+SetModel action, the same pattern the skill picker uses), and the `/model `
+hint shows the model in its description column. Profiles whose name already
+is the model (e.g. mock) are not doubled.
 
 v0.6.4 fixes a silent truncation in the transcript that made `!` shell output
 look wrong: every tool bubble rendered only the first 5 lines of its result,
